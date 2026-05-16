@@ -69,7 +69,8 @@ export async function tasksCommand(
   }
 }
 
-// CLI 直接调用
+// CLI 直接调用（仅当文件作为入口运行时执行）
+if (import.meta.main) {
 const args = process.argv.slice(2);
 const projectName = args[0];
 const prdIndex = args.indexOf('--prd');
@@ -83,4 +84,5 @@ if (!projectName) {
   process.exit(1);
 }
 
-tasksCommand(projectName, prdPath, archPath);
+  tasksCommand(projectName, prdPath, archPath);
+}

@@ -56,12 +56,13 @@ export async function prdCommand(projectName: string, configPath?: string): Prom
   }
 }
 
-// CLI 直接调用
-const projectName = process.argv[2];
-if (!projectName) {
-  console.error('用法: bun run cli/prd.ts <project-name>');
-  console.error('示例: bun run cli/prd.ts my-awesome-app');
-  process.exit(1);
+// CLI 直接调用（仅当文件作为入口运行时执行）
+if (import.meta.main) {
+  const projectName = process.argv[2];
+  if (!projectName) {
+    console.error('用法: bun run cli/prd.ts <project-name>');
+    console.error('示例: bun run cli/prd.ts my-awesome-app');
+    process.exit(1);
+  }
+  prdCommand(projectName);
 }
-
-prdCommand(projectName);

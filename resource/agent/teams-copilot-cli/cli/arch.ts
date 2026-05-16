@@ -66,16 +66,18 @@ export async function archCommand(
   }
 }
 
-// CLI 直接调用
-const args = process.argv.slice(2);
-const projectName = args[0];
-const prdIndex = args.indexOf('--prd');
-const prdPath = prdIndex !== -1 ? args[prdIndex + 1] : undefined;
+// CLI 直接调用（仅当文件作为入口运行时执行）
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const projectName = args[0];
+  const prdIndex = args.indexOf('--prd');
+  const prdPath = prdIndex !== -1 ? args[prdIndex + 1] : undefined;
 
-if (!projectName) {
-  console.error('用法: bun run cli/arch.ts <project-name> [--prd <prd-file-path>]');
-  console.error('示例: bun run cli/arch.ts my-awesome-app');
-  process.exit(1);
+  if (!projectName) {
+    console.error('用法: bun run cli/arch.ts <project-name> [--prd <prd-file-path>]');
+    console.error('示例: bun run cli/arch.ts my-awesome-app');
+    process.exit(1);
+  }
+
+  archCommand(projectName, prdPath);
 }
-
-archCommand(projectName, prdPath);

@@ -34,6 +34,8 @@ export async function askCommand(question: string, configPath?: string): Promise
   }
 }
 
-// CLI 直接调用
-const question = process.argv[2];
-askCommand(question);
+// CLI 直接调用（仅当文件作为入口运行时执行）
+if (import.meta.main) {
+  const question = process.argv[2];
+  askCommand(question);
+}
