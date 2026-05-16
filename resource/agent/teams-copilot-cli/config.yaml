@@ -1,0 +1,14 @@
+# config.yaml — Teams Copilot CLI 运行配置
+edge:
+  # Edge 浏览器可执行文件路径（Windows 默认路径）
+  executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  # 独立用户数据目录，避免端口冲突和日常浏览干扰
+  userDataDir: "C:\\teams-copilot-profile"
+  debuggingPort: 9222
+
+copilot:
+  url: "https://teams.microsoft.com"
+  # 输入框选择器（ARIA 语义优先，CSS fallback）
+  inputSelector: "[data-tid='messageInputEditor'], [role='textbox'], [aria-label*='message']"
+  # 流式输出超时（毫秒）
+  timeout: 90000

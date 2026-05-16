@@ -1,0 +1,25 @@
+{
+  "name": "teams-copilot-cli",
+  "version": "1.0.0",
+  "description": "Teams Copilot CLI — GPT-5.5 Planning Runtime physical-layer integration via Playwright",
+  "main": "cli/index.ts",
+  "type": "module",
+  "scripts": {
+    "ask": "bun run cli/ask.ts",
+    "prd": "bun run cli/prd.ts",
+    "arch": "bun run cli/arch.ts",
+    "tasks": "bun run cli/tasks.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jackwener/opencli": "^1.7.22",
+    "commander": "^13.1.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.14.0",
+    "typescript": "^5.7.0",
+    "ts-node": "^10.9.0"
+  }
+}
