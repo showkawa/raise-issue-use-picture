@@ -7,8 +7,8 @@ edge:
   debuggingPort: 9222
 
 copilot:
-  url: "https://teams.microsoft.com"
-  # 输入框选择器（ARIA 语义优先，CSS fallback）
-  inputSelector: "[data-tid='messageInputEditor'], [role='textbox'], [aria-label*='message']"
+  url: "https://teams.cloud.microsoft"
+  # 输入框选择器（Copilot iframe 中的 contentEditable span）
+  inputSelector: "[role=\"textbox\"][contenteditable=\"true\"], [aria-label*=\"Copilot 发送\"]"
   # 流式输出超时（毫秒）
   timeout: 90000

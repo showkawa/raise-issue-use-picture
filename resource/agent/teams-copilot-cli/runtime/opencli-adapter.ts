@@ -124,54 +124,18 @@ class IFrameClient {
   }
 
   /**
-   * 向 Copilot iframe 输入框注入文本（兼容 React / contentEditable）。
+   * 在 contentEditable 元素中注入文本（Copilot 输入框是 span[contenteditable]）。
    */
   async type(selector: string, text: string): Promise<void> {
-    // Step 1: find and click to focus (activates React-controlled input)
-    const debug = await this.evaluate<string>(`(() => {
+    await this.evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return 'NOT_FOUND';
+      if (!el) throw new Error('Element not found: ${selector}');
       el.focus();
-      el.click();
-      // contentEditable: clear + set innerText (more reliable than textContent)
-      if (el.getAttribute('contenteditable') !== null) {
-        el.innerText = '';
-        el.focus();
-        // Simulate real typing via document.execCommand
-        try { document.execCommand('selectAll', false, undefined); } catch(e) {}
-        try { document.execCommand('insertText', false, ${JSON.stringify(text)}); } catch(e) {
-          el.innerText = ${JSON.stringify(text)};
-        }
-      } else {
-        const nativeInput = el as HTMLInputElement | HTMLTextAreaElement;
-        nativeInput.value = ${JSON.stringify(text)};
-      }
-      el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true, data: ${JSON.stringify(text)} }));
+      // contentEditable 元素：设置 textContent 并派发 input 事件
+      el.textContent = ${JSON.stringify(text)};
+      el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      return 'OK:' + (el.textContent?.slice(0, 50) ?? 'EMPTY');
     })()`);
-    console.log(`[IFrameClient.type] result: ${debug}`);
-    if (debug === 'NOT_FOUND') throw new Error(`Element not found: ${selector}`);
-  }
-
-      // Dispatch real InputEvent (React listens for this, not plain Event)
-      el.dispatchEvent(new InputEvent('input', {
-        bubbles: true, cancelable: true, inputType: 'insertText',
-        data: ${JSON.stringify(text)}
-      }));
-      el.dispatchEvent(new InputEvent('change', {
-        bubbles: true, cancelable: true
-      }));
-
-      // Verify
-      const actual = el.textContent || (el as HTMLTextAreaElement).value || '';
-      return actual.includes(${JSON.stringify(text)}) ? 'OK' : 'TEXT_MISMATCH:' + actual.substring(0, 50);
-    })()`);
-
-    if (result !== 'OK') {
-      console.log(`[IFrameClient] type() result: ${result}`);
-      // Don't throw - Copilot might still work even if verification fails
-    }
   }
 
   /**
