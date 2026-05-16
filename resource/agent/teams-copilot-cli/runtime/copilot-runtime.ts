@@ -112,10 +112,11 @@ export class CopilotRuntime {
    * 流式获取结果，包含截断检测与自动续写。
    *
    * 流程：
-   *  1. 等待流式输出结束（observer 标志位）
-   *  2. 防抖确认文本稳定（3 个循环）
+   *  1. 等待流式输出结束（带重试机制，最多 3 次）
+   *  2. 防抖确认文本稳定（2 个循环）
    *  3. 检测截断 → 自动发送续写 Prompt
    *  4. 清洗 Teams 添加的废话（前缀寒暄/后缀追问）
+   *  5. 超时后返回已获取的部分内容而不是直接抛错
    */
   async fetchResult(): Promise<string> {
     let finalText = '';
@@ -123,34 +124,45 @@ export class CopilotRuntime {
     let stableCount = 0;
 
     const timeout = this.config.copilot.timeout;
-
-    let retryCount = 0;
-    const maxRetries = 3;
+    const MAX_LOOP_ITERATIONS = 20;
+    let loopCount = 0;
 
     let truncationRetries = 0;
-    const MAX_TRUNCATION_RETRIES = 3;
+    const MAX_TRUNCATION_RETRIES = 2;
 
-    while (true) {
+    while (loopCount < MAX_LOOP_ITERATIONS) {
+      loopCount++;
       try {
-        await this.adapter.waitForStreamingEnd(timeout);
+        // 带重试的 waitForStreamingEnd（内部重试最多 3 次）
+        await this.adapter.waitForStreamingEnd(timeout, 3);
 
         const currentText = await this.adapter.readBuffer();
 
+        // If we got empty text, retry once
+        if (currentText.length === 0) {
+          if (loopCount === 1) {
+            lastLength = 0;
+            continue;
+          }
+          break; // Give up after first retry
+        }
+
         // 防抖：判断文本是否真正停止变化
-        if (currentText.length === lastLength) {
+        if (currentText.length === lastLength && currentText.length > 0) {
           stableCount++;
         } else {
           stableCount = 0;
         }
 
-        if (stableCount > 3 && currentText.length > 0) {
+        if (stableCount >= 2 && currentText.length > 0) {
           finalText = currentText;
 
           // 检测截断：末尾无标点，或代码块未闭合
+          const trimmedText = finalText.trim();
           const isTruncated =
             truncationRetries < MAX_TRUNCATION_RETRIES &&
-            (!/[.?!。？！\n`]{1,2}$/.test(finalText.trim()) ||
-            (finalText.split('```').length % 2 === 0));
+            (!/[.?!。？！\n`]{1,2}$/.test(trimmedText) ||
+            (trimmedText.split('```').length % 2 === 0));
 
           if (isTruncated) {
             truncationRetries++;
@@ -170,11 +182,27 @@ export class CopilotRuntime {
 
         lastLength = currentText.length;
       } catch (err) {
+        // 响应超时后返回已获取的部分内容而不是直接抛错
+        const partialText = await this.adapter.readBuffer().catch(() => '');
+        if (partialText.length > 50) {
+          console.log('[CopilotRuntime] Streaming timeout but got partial response, returning it.');
+          finalText = partialText;
+          break;
+        }
+        if (finalText.length > 50) {
+          console.log('[CopilotRuntime] Timeout but got partial response from previous loop, returning it.');
+          break;
+        }
+        // Only throw if we truly have nothing
         throw new Error(
           `STREAMING_TIMEOUT: 生成超时（${timeout}ms），请检查网络或 Copilot 状态。` +
             (err instanceof Error ? `\n原始错误: ${err.message}` : ''),
         );
       }
+    }
+
+    if (loopCount >= MAX_LOOP_ITERATIONS && finalText.length === 0) {
+      throw new Error('STREAMING_TIMEOUT: 达到最大循环次数，获取结果失败。');
     }
 
     return this.sanitizeMarkdown(finalText);
@@ -185,9 +213,21 @@ export class CopilotRuntime {
    *  - 前缀寒暄（"好的，这是您的PRD..."）
    *  - 后缀追问（"是否需要我继续?"）
    *  - 多余的反引号包裹
+   *  - 续写提示词残留
+   *  - 用户 prompt 残留
    */
   private sanitizeMarkdown(raw: string): string {
     let cleaned = raw;
+
+    // 移除续写提示词残留
+    cleaned = cleaned.replace(/请严格从你断开的地方继续输出，不要重复已输出的内容，不要任何前缀。/g, '');
+    cleaned = cleaned.replace(/请继续/g, '');
+
+    // 移除用户 prompt 残留（常见模式）
+    cleaned = cleaned.replace(/请直接输出完整回答，不要有任何前缀寒暄和后缀追问。/g, '');
+    cleaned = cleaned.replace(/请直接输出 Markdown 格式的 PRD，不要有任何前缀寒暄和后缀追问。/g, '');
+    cleaned = cleaned.replace(/请直接输出 Markdown 格式的架构设计文档，不要有任何前缀寒暄和后缀追问。/g, '');
+    cleaned = cleaned.replace(/请直接输出 Markdown 格式，不要有任何前缀寒暄和后缀追问。/g, '');
 
     // 移除常见的 AI 寒暄前缀行
     cleaned = cleaned.replace(

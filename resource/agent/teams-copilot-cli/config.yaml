@@ -7,8 +7,12 @@ edge:
   debuggingPort: 9222
 
 copilot:
-  url: "https://teams.cloud.microsoft"
-  # 输入框选择器（Copilot iframe 中的 contentEditable span）
-  inputSelector: "[role=\"textbox\"][contenteditable=\"true\"], [aria-label*=\"Copilot 发送\"]"
+  url: "https://teams.microsoft.com"
+  # 输入框选择器（Copilot 输入区域 - contenteditable div）
+  inputSelector: "[contenteditable=\"true\"], [role=\"textbox\"], textarea[aria-label*=\"消息\"]"
+  # 发送按钮选择器（蓝色圆形箭头按钮）
+  sendButtonSelector: "button[aria-label*=\"发送\"], button[aria-label*=\"Send\"], button[type=\"submit\"]"
+  # 消息区域选择器（用于读取 Copilot 回复）
+  messageSelector: "[data-content=\"ai-message\"], [role=\"log\"], [aria-live=\"polite\"], .message-body"
   # 流式输出超时（毫秒）
   timeout: 90000

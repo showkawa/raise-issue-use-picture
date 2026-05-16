@@ -38,6 +38,17 @@ interface CDPResponse {
   error?: { message: string };
 }
 
+/** CDP key event params for Input.dispatchKeyEvent */
+interface CDPKeyEventParams {
+  type: 'keyDown' | 'keyUp' | 'rawKeyDown' | 'char';
+  key?: string;
+  code?: string;
+  windowsVirtualKeyCode?: number;
+  modifiers?: number;
+  text?: string;
+  unmodifiedText?: string;
+}
+
 class IFrameClient {
   private ws: WebSocket | null = null;
   private msgId = 0;
@@ -115,6 +126,130 @@ class IFrameClient {
     });
   }
 
+  /** Send a raw CDP key event via Input.dispatchKeyEvent */
+  private async dispatchKeyEvent(params: CDPKeyEventParams): Promise<void> {
+    await this.cdpSend('Input.dispatchKeyEvent', params as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * 通过 CDP Input.dispatchKeyEvent 清空 Lexical 编辑器。
+   * 使用 Ctrl+A 全选 + Backspace 删除，兼容 Lexical 的 contentEditable 处理。
+   */
+  async clearLexicalEditor(): Promise<void> {
+    // Ctrl+A: Select all
+    await this.dispatchKeyEvent({
+      type: 'rawKeyDown',
+      key: 'Control',
+      code: 'ControlLeft',
+      windowsVirtualKeyCode: 17,
+    });
+    await this.dispatchKeyEvent({
+      type: 'rawKeyDown',
+      key: 'a',
+      code: 'KeyA',
+      windowsVirtualKeyCode: 65,
+      modifiers: 2, // Ctrl
+    });
+    await this.dispatchKeyEvent({
+      type: 'keyUp',
+      key: 'a',
+      code: 'KeyA',
+      windowsVirtualKeyCode: 65,
+      modifiers: 2,
+    });
+    await this.dispatchKeyEvent({
+      type: 'keyUp',
+      key: 'Control',
+      code: 'ControlLeft',
+      windowsVirtualKeyCode: 17,
+    });
+
+    // Small wait for selection
+    await new Promise(r => setTimeout(r, 100));
+
+    // Backspace: Delete selected content
+    await this.dispatchKeyEvent({
+      type: 'rawKeyDown',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+      unmodifiedText: '\b',
+    });
+    await this.dispatchKeyEvent({
+      type: 'keyUp',
+      key: 'Backspace',
+      code: 'Backspace',
+      windowsVirtualKeyCode: 8,
+    });
+
+    // Small wait for Lexical to process
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  /**
+   * 通过 CDP Input.dispatchKeyEvent 逐字符输入文本。
+   * 兼容 Lexical 编辑器——Lexical 会拦截 CDP 的 keyDown/keyUp 事件正确处理输入。
+   */
+  async typeViaKeyboard(text: string): Promise<void> {
+    for (const char of text) {
+      const keyDef = getKeyDef(char);
+      // keyDown
+      await this.dispatchKeyEvent({
+        type: 'keyDown',
+        key: char,
+        code: keyDef.code,
+        windowsVirtualKeyCode: keyDef.vk,
+        text: char,
+        unmodifiedText: char,
+      });
+      // char event (for text input)
+      await this.dispatchKeyEvent({
+        type: 'char',
+        key: char,
+        code: keyDef.code,
+        windowsVirtualKeyCode: keyDef.vk,
+        text: char,
+      });
+      // keyUp
+      await this.dispatchKeyEvent({
+        type: 'keyUp',
+        key: char,
+        code: keyDef.code,
+        windowsVirtualKeyCode: keyDef.vk,
+        text: char,
+      });
+      // Small delay between characters for Lexical to keep up
+      await new Promise(r => setTimeout(r, 5));
+    }
+  }
+
+  /**
+   * 查找 Copilot 发送按钮，按优先级尝试：
+   *  1. button[aria-label*="发送"]
+   *  2. button[title*="发送"]
+   *  3. button[aria-label*="Send"]
+   * 返回按钮找到/点击状态，若都找不到则返回 null 以便 fallback。
+   */
+  async findSendButton(): Promise<'clicked' | 'disabled' | 'not_found'> {
+    const result = await this.evaluate<string>(`(() => {
+      const selectors = [
+        'button[aria-label*="发送"]',
+        'button[title*="发送"]',
+        'button[aria-label*="Send"]',
+      ];
+      for (const sel of selectors) {
+        const btn = document.querySelector(sel);
+        if (btn) {
+          if (btn.disabled) return 'disabled';
+          btn.click();
+          return 'clicked';
+        }
+      }
+      return 'not_found';
+    })()`);
+    return result as 'clicked' | 'disabled' | 'not_found';
+  }
+
   async evaluate<T = unknown>(expression: string): Promise<T> {
     const res = (await this.cdpSend('Runtime.evaluate', {
       expression,
@@ -125,49 +260,90 @@ class IFrameClient {
 
   /**
    * 在 contentEditable 元素中注入文本（Copilot 输入框是 span[contenteditable]）。
+   * 使用 CDP 键盘事件清空 + 逐字符输入，100% 兼容 Lexical 编辑器。
    */
   async type(selector: string, text: string): Promise<void> {
+    // 先聚焦元素
     await this.evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) throw new Error('Element not found: ${selector}');
       el.focus();
-      // contentEditable 元素：设置 textContent 并派发 input 事件
-      el.textContent = ${JSON.stringify(text)};
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
+
+    await new Promise(r => setTimeout(r, 300));
+
+    // 使用 CDP 键盘事件清空
+    await this.clearLexicalEditor();
+
+    // 使用 CDP 键盘事件逐字符输入
+    await this.typeViaKeyboard(text);
+
+    // 等待 Lexical 编辑器处理所有输入事件
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
   /**
-   * 在 contentEditable 元素中派发 Enter 键事件触发发送。
+   * 点击发送按钮触发发送（优先点击按钮，fallback 到 Enter 键）。
    */
   async send(): Promise<void> {
-    await this.evaluate(`(() => {
-      const el = document.activeElement;
-      if (!el) return;
-      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      el.dispatchEvent(new KeyboardEvent('keydown', opts));
-      el.dispatchEvent(new KeyboardEvent('keypress', opts));
-      el.dispatchEvent(new KeyboardEvent('keyup', opts));
-    })()`);
+    const status = await this.findSendButton();
+
+    if (status === 'clicked') {
+      console.log('[IFrameClient] Send button clicked successfully.');
+      return;
+    }
+
+    if (status === 'disabled') {
+      console.log('[IFrameClient] Send button is disabled, trying Enter key fallback.');
+    } else {
+      console.log('[IFrameClient] Send button not found, trying Enter key fallback.');
+    }
+
+    // Fallback: 通过 CDP 发送 Enter 键
+    await this.dispatchKeyEvent({
+      type: 'rawKeyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      unmodifiedText: '\r',
+    });
+    await this.dispatchKeyEvent({
+      type: 'char',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      text: '\r',
+    });
+    await this.dispatchKeyEvent({
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    });
   }
 
   /**
    * Poll-based streaming detection: directly scans iframe DOM for text changes.
-   * Stops when text length unchanged for 5+ consecutive polls (5s of stability).
+   * Stops when text length unchanged for 3+ consecutive polls (3s of stability).
    */
   async waitForStreamingEnd(timeout: number): Promise<void> {
     const deadline = Date.now() + timeout;
     let lastLen = -1;
     let sameCount = 0;
+    const STABILITY_THRESHOLD = 3; // Reduced from 5 to 3 for faster detection
 
     while (Date.now() < deadline) {
       const text = await this.pollCopilotResponse();
       const currentLen = text.length;
 
-      if (currentLen > 0 && currentLen === lastLen) {
+      // If we have substantial content and it's stable, we're done
+      if (currentLen > 50 && currentLen === lastLen) {
         sameCount++;
-        if (sameCount >= 5) return; // stable for 5 polls = done
+        if (sameCount >= STABILITY_THRESHOLD) return;
+      } else if (currentLen > 50 && Math.abs(currentLen - lastLen) < 10) {
+        // Small changes (like punctuation) are okay, count as stable
+        sameCount++;
+        if (sameCount >= STABILITY_THRESHOLD) return;
       } else {
         sameCount = 0;
         lastLen = currentLen;
@@ -175,30 +351,70 @@ class IFrameClient {
 
       await new Promise((r) => setTimeout(r, 1000));
     }
+
+    // If we have content but didn't reach stability, return anyway
+    const finalText = await this.pollCopilotResponse();
+    if (finalText.length > 50) return;
+
     throw new Error('STREAMING_TIMEOUT');
   }
 
   /**
    * Poll Copilot response container text directly from iframe DOM.
-   * 只读对话区域，不回退到 document.body（噪音太多）。
+   * 主要读取 [role="main"] 区域，解析 "Copilot said:" 后的内容。
    */
   private async pollCopilotResponse(): Promise<string> {
     return (await this.evaluate<string>(`(() => {
-      // Try specific Copilot response containers (Outlook/M365 Copilot iframe).
-      // Order matters: most-specific first, fallback to main area LAST.
-      // AVOID document.body — it includes sidebar, header, timestamps.
-      const sel = document.querySelector(
-        '[data-content="ai-message"]:last-child, ' +
-        '.ac-container:last-child, ' +
-        '[role="log"]:last-child, ' +
-        '[aria-live="polite"]'
-      );
-      if (sel) return sel.innerText || '';
-
-      // Fallback: entire main role area (excludes sidebars)
       const main = document.querySelector('[role="main"]');
-      if (main) return main.innerText?.trim() || '';
-      return '';
+      if (!main) return '';
+
+      const fullText = main.innerText || '';
+      const lines = fullText.split('\\n');
+
+      // Find the last "Copilot said:" section and extract response
+      let lastCopilotStart = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line === 'Copilot' || line.startsWith('Copilot said:')) {
+          lastCopilotStart = i;
+          break;
+        }
+      }
+
+      if (lastCopilotStart === -1) {
+        return fullText.trim();
+      }
+
+      // Extract lines after "Copilot" header until next "You said:" or UI elements
+      const responseLines = [];
+      for (let i = lastCopilotStart + 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+
+        // Stop at next user message
+        if (line.startsWith('You said:')) {
+          break;
+        }
+
+        // Stop at UI elements that appear after the response
+        if (line.startsWith('结果计数:') ||
+            line.startsWith('通过选择加号图标') ||
+            line.startsWith('AI 生成的内容可能不正确') ||
+            line.startsWith('向 Copilot 发送消息') ||
+            line.startsWith('自动') ||
+            line.startsWith('升级 Copilot') ||
+            line === '提供反馈') {
+          break; // Stop parsing at UI elements
+        }
+
+        // Skip empty lines and loading indicators
+        if (line === '' || line === '正在生成响应') {
+          continue;
+        }
+
+        responseLines.push(line);
+      }
+
+      return responseLines.join('\\n').trim() || fullText.trim();
     })()`)) ?? '';
   }
 
@@ -211,6 +427,68 @@ class IFrameClient {
     this.ws = null;
     this.pending.clear();
   }
+}
+
+// ============================================================
+// Key mapping helpers for CDP keyboard input
+// ============================================================
+
+interface KeyDef {
+  code: string;
+  vk: number;
+}
+
+function getKeyDef(char: string): KeyDef {
+  const code = char.charCodeAt(0);
+
+  // Letters
+  if (code >= 65 && code <= 90) return { code: `Key${char}`, vk: code };
+  if (code >= 97 && code <= 122) return { code: `Key${char.toUpperCase()}`, vk: code - 32 };
+
+  // Digits
+  if (code >= 48 && code <= 57) return { code: `Digit${char}`, vk: code };
+
+  // Common symbols and punctuation
+  const symbolMap: Record<string, { code: string; vk: number }> = {
+    ' ':  { code: 'Space',        vk: 0x20 },
+    '!':  { code: 'Digit1',       vk: 0x31 },
+    '"':  { code: 'Quote',        vk: 0xDE },
+    '#':  { code: 'Digit3',       vk: 0x33 },
+    '$':  { code: 'Digit4',       vk: 0x34 },
+    '%':  { code: 'Digit5',       vk: 0x35 },
+    '&':  { code: 'Digit7',       vk: 0x37 },
+    "'":  { code: 'Quote',        vk: 0xDE },
+    '(':  { code: 'Digit9',       vk: 0x39 },
+    ')':  { code: 'Digit0',       vk: 0x30 },
+    '*':  { code: 'Digit8',       vk: 0x38 },
+    '+':  { code: 'Equal',        vk: 0xBB },
+    ',':  { code: 'Comma',        vk: 0xBC },
+    '-':  { code: 'Minus',        vk: 0xBD },
+    '.':  { code: 'Period',       vk: 0xBE },
+    '/':  { code: 'Slash',        vk: 0xBF },
+    ':':  { code: 'Semicolon',    vk: 0xBA },
+    ';':  { code: 'Semicolon',    vk: 0xBA },
+    '<':  { code: 'Comma',        vk: 0xBC },
+    '=':  { code: 'Equal',        vk: 0xBB },
+    '>':  { code: 'Period',       vk: 0xBE },
+    '?':  { code: 'Slash',        vk: 0xBF },
+    '@':  { code: 'Digit2',       vk: 0x32 },
+    '[':  { code: 'BracketLeft',  vk: 0xDB },
+    '\\': { code: 'Backslash',    vk: 0xDC },
+    ']':  { code: 'BracketRight', vk: 0xDD },
+    '^':  { code: 'Digit6',       vk: 0x36 },
+    '_':  { code: 'Minus',        vk: 0xBD },
+    '`':  { code: 'Backquote',    vk: 0xC0 },
+    '{':  { code: 'BracketLeft',  vk: 0xDB },
+    '|':  { code: 'Backslash',    vk: 0xDC },
+    '}':  { code: 'BracketRight', vk: 0xDD },
+    '~':  { code: 'Backquote',    vk: 0xC0 },
+  };
+
+  if (symbolMap[char]) return symbolMap[char];
+
+  // Fallback for unknown characters: use key char itself and common VK
+  return { code: `Key${char.toUpperCase()}`, vk: code || 0xBF };
 }
 
 // ============================================================
@@ -333,42 +611,93 @@ export class OpenCLIAdapter {
   }
 
   /**
+   * 查找发送按钮，按优先级尝试：
+   *  1. button[aria-label*="发送"]
+   *  2. button[title*="发送"]
+   *  3. button[aria-label*="Send"]
+   * 返回点击结果；用于主页面（非 iframe 模式）。
+   */
+  async findSendButton(): Promise<'clicked' | 'disabled' | 'not_found'> {
+    if (this.iframe) {
+      return this.iframe.findSendButton();
+    }
+
+    if (!this.page) throw new Error('[OpenCLIAdapter] Page not initialized');
+
+    const result = await this.page.evaluate(() => {
+      const selectors = [
+        'button[aria-label*="发送"]',
+        'button[title*="发送"]',
+        'button[aria-label*="Send"]',
+      ];
+      for (const sel of selectors) {
+        const btn = document.querySelector(sel) as HTMLButtonElement | null;
+        if (btn) {
+          if (btn.disabled) return 'disabled';
+          btn.click();
+          return 'clicked';
+        }
+      }
+      return 'not_found';
+    });
+
+    return result as 'clicked' | 'disabled' | 'not_found';
+  }
+
+  /**
    * 核心方法：注入 Prompt 文本到 Copilot 输入框。
    * 优先使用 iframe 连接（contentEditable span），fallback 到主页面原生 value setter。
    */
   async injectPrompt(text: string, inputSelector?: string): Promise<void> {
     if (this.iframe) {
-      const selector = inputSelector ?? '[role="textbox"][contenteditable="true"]';
+      const selector = inputSelector ?? '[contenteditable="true"], [role="textbox"]';
       // 等待 iframe 中的输入框就绪
       await this.iframeWaitForSelector(selector, 15000);
+      // IFrameClient.type() 内部使用 clearLexicalEditor + typeViaKeyboard
       await this.iframe.type(selector, text);
-      await new Promise((r) => setTimeout(r, 500));
       return;
     }
 
     if (!this.page) throw new Error('[OpenCLIAdapter] Page not initialized');
 
-    const selector = inputSelector ?? '[role="textbox"][aria-label*="message"]';
+    const selector = inputSelector ?? '[contenteditable="true"], [role="textbox"], textarea[aria-label*="消息"]';
 
     // 先聚焦输入框
     await this.page.click(selector);
 
-    // 使用 opencli type() 注入 — 原生 setter，不会逐字触发键盘
+    // 使用 opencli type() 注入
     const pageWithType = this.page as IPage & { type(ref: string, text: string): Promise<void> };
     if (typeof pageWithType.type === 'function') {
       await pageWithType.type(selector, text);
     } else {
-      // fallback: 通过 evaluate 直接设置 value
+      // fallback: 通过 evaluate 使用原生 setter 注入
       await this.page.evaluate(
         (sel: string, txt: string) => {
-          const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement | null;
+          const el = document.querySelector(sel) as HTMLElement | null;
           if (!el) throw new Error(`Element not found: ${sel}`);
-          const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-          const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')!;
-          nativeSetter.set!.call(el, txt);
+
+          el.focus();
+          el.textContent = '';
           el.dispatchEvent(new Event('input', { bubbles: true }));
+
+          // 处理 contenteditable 元素
+          if (el.isContentEditable) {
+            el.textContent = txt;
+            el.dispatchEvent(new InputEvent('input', {
+              bubbles: true,
+              cancelable: true,
+              inputType: 'insertFromPaste',
+              data: txt,
+            }));
+          } else {
+            // 处理 input/textarea 元素
+            const proto = el instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype
+              : HTMLInputElement.prototype;
+            const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')!;
+            nativeSetter.set!.call(el, txt);
+          }
+
           el.dispatchEvent(new Event('change', { bubbles: true }));
         },
         selector,
@@ -376,13 +705,13 @@ export class OpenCLIAdapter {
       );
     }
 
-    // 等待防抖
-    await new Promise((r) => setTimeout(r, 500));
+    // 等待防抖和 Lexical 处理
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   /**
-   * 触发发送 — 通过 evaluate 派发 Enter 键事件。
-   * iframe 模式下使用 IFrameClient.send() 操作 contentEditable 元素。
+   * 触发发送 — 优先使用 findSendButton() 查找发送按钮，fallback 到 Enter 键。
+   * iframe 模式下使用 IFrameClient.send() 操作。
    */
   async send(): Promise<void> {
     if (this.iframe) {
@@ -392,11 +721,20 @@ export class OpenCLIAdapter {
 
     if (!this.page) throw new Error('[OpenCLIAdapter] Page not initialized');
 
+    const status = await this.findSendButton();
+
+    if (status === 'clicked') {
+      console.log('[OpenCLIAdapter] Send button clicked successfully.');
+      return;
+    }
+
+    console.log(`[OpenCLIAdapter] Send button ${status}, falling back to Enter key.`);
+
+    // Fallback: 通过 keyboard 或 evaluate 派发 Enter 键
     const pageWithKB = this.page as IPage & { keyboard?: { press(key: string): Promise<void> } };
     if (pageWithKB.keyboard) {
       await pageWithKB.keyboard.press('Enter');
     } else {
-      // fallback: 通过 evaluate 派发键盘事件
       await this.page.evaluate(() => {
         const el = document.activeElement as HTMLElement | null;
         if (!el) return;
@@ -410,29 +748,80 @@ export class OpenCLIAdapter {
 
   /**
    * 业务级等待：等待流式输出结束。
-   * 使用 evaluate 轮询注入的 window.__copilotIsStreaming 标志位。
+   * 使用直接 DOM 轮询（与 iframe 路径一致）。
+   * 带重试机制：失败后重试最多 3 次。
    */
-  async waitForStreamingEnd(timeout: number): Promise<void> {
-    if (this.iframe) {
-      await this.iframe.waitForStreamingEnd(timeout);
-      return;
+  async waitForStreamingEnd(timeout: number, maxRetries = 3): Promise<void> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (this.iframe) {
+          await this.iframe.waitForStreamingEnd(timeout);
+        } else if (this.page) {
+          await this.waitForStreamingEndPage(timeout);
+        } else {
+          throw new Error('[OpenCLIAdapter] Page not initialized');
+        }
+        return; // Success
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < maxRetries) {
+          console.log(`[OpenCLIAdapter] Streaming check failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying...`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
 
+    throw lastError ?? new Error('STREAMING_TIMEOUT');
+  }
+
+  /**
+   * 主页面的 waitForStreamingEnd 实现（与 iframe 路径一致的轮询策略）。
+   */
+  private async waitForStreamingEndPage(timeout: number): Promise<void> {
     if (!this.page) throw new Error('[OpenCLIAdapter] Page not initialized');
 
     const deadline = Date.now() + timeout;
+    let lastLen = -1;
+    let sameCount = 0;
+    const STABILITY_THRESHOLD = 3;
+
     while (Date.now() < deadline) {
-      const isStreaming = await this.page.evaluate(
-        () => window.__copilotIsStreaming,
-      );
-      if (isStreaming === false) return;
-      await new Promise((r) => setTimeout(r, 500));
+      const text = await this.page.evaluate(() => {
+        const main = document.querySelector('[role="main"]');
+        if (!main) return '';
+        return (main as HTMLElement).innerText || '';
+      }) as string;
+
+      const currentLen = text.length;
+      if (currentLen > 50 && currentLen === lastLen) {
+        sameCount++;
+        if (sameCount >= STABILITY_THRESHOLD) return;
+      } else if (currentLen > 50 && Math.abs(currentLen - lastLen) < 10) {
+        sameCount++;
+        if (sameCount >= STABILITY_THRESHOLD) return;
+      } else {
+        sameCount = 0;
+        lastLen = currentLen;
+      }
+
+      await new Promise((r) => setTimeout(r, 1000));
     }
+
+    // If we have content but didn't reach stability, return anyway
+    const finalText = await this.page.evaluate(() => {
+      const main = document.querySelector('[role="main"]');
+      if (!main) return '';
+      return (main as HTMLElement).innerText || '';
+    }) as string;
+    if (finalText.length > 50) return;
+
     throw new Error('STREAMING_TIMEOUT');
   }
 
   /**
-   * 从注入的 observer 缓存中读取当前完整文本。
+   * 从 DOM 中读取当前完整文本（与 iframe 路径一致）。
    */
   async readBuffer(): Promise<string> {
     if (this.iframe) {
@@ -441,10 +830,12 @@ export class OpenCLIAdapter {
 
     if (!this.page) throw new Error('[OpenCLIAdapter] Page not initialized');
 
-    const text = await this.page.evaluate(
-      () => window.__copilotBuffer ?? '',
-    );
-    return text;
+    const text = await this.page.evaluate(() => {
+      const main = document.querySelector('[role="main"]');
+      if (!main) return '';
+      return (main as HTMLElement).innerText || '';
+    }) as string;
+    return text ?? '';
   }
 
   /**

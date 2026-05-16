@@ -17,6 +17,8 @@ export interface TeamsCopilotConfig {
   copilot: {
     url: string;
     inputSelector: string;
+    sendButtonSelector: string;
+    messageSelector: string;
     timeout: number;
   };
 }
@@ -53,6 +55,15 @@ function validateConfig(config: TeamsCopilotConfig): void {
   }
   if (!config.copilot?.url) {
     throw new Error('[SessionManager] config.yaml 缺少 copilot.url');
+  }
+  if (!config.copilot?.inputSelector) {
+    throw new Error('[SessionManager] config.yaml 缺少 copilot.inputSelector');
+  }
+  if (!config.copilot?.sendButtonSelector) {
+    throw new Error('[SessionManager] config.yaml 缺少 copilot.sendButtonSelector');
+  }
+  if (!config.copilot?.messageSelector) {
+    throw new Error('[SessionManager] config.yaml 缺少 copilot.messageSelector');
   }
   if (!config.copilot?.timeout || config.copilot.timeout <= 0) {
     throw new Error('[SessionManager] config.yaml copilot.timeout 无效');
