@@ -76,6 +76,7 @@ export function isAuthenticated(url: string): boolean {
  */
 export const ERROR_CODES = {
   AUTH_EXPIRED: 77,
+  COPILOT_UNAVAILABLE: 66,
   STREAMING_TIMEOUT: 88,
   CONFIG_ERROR: 99,
   UNKNOWN: 1,
@@ -84,6 +85,7 @@ export const ERROR_CODES = {
 /** 根据错误消息映射退出码 */
 export function mapErrorCode(message: string): number {
   if (message.includes('AUTH_EXPIRED')) return ERROR_CODES.AUTH_EXPIRED;
+  if (message.includes('COPILOT_UNAVAILABLE')) return ERROR_CODES.COPILOT_UNAVAILABLE;
   if (message.includes('TIMEOUT') || message.includes('STREAMING_TIMEOUT'))
     return ERROR_CODES.STREAMING_TIMEOUT;
   if (message.includes('CONFIG')) return ERROR_CODES.CONFIG_ERROR;

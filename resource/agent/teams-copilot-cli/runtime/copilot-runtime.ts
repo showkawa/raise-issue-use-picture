@@ -10,7 +10,6 @@
  */
 
 import { OpenCLIAdapter } from './opencli-adapter.js';
-import { OBSERVER_SCRIPT } from './observer-injector.js';
 import {
   loadConfig,
   isAuthenticated,
@@ -38,52 +37,74 @@ export class CopilotRuntime {
    * 确保 Teams 会话有效：
    *  1. 导航到 Teams
    *  2. 检测是否被重定向到登录页
-   *  3. 注入 MutationObserver 监听脚本
+   *  （Observer 注入推迟到 Copilot iframe 连接之后）
    */
   async ensureSession(): Promise<void> {
     const page = this.adapter.getPage();
     if (!page) throw new Error('[CopilotRuntime] Page not initialized');
 
-    await page.goto(this.config.copilot.url, { waitUntil: 'load', settleMs: 3000 });
+    // 检查当前 URL，如果已在 Teams 则跳过导航
+    const currentUrl = (await page.evaluate(() => window.location.href)) as string;
+    if (!currentUrl.includes('teams.')) {
+      await page.goto(this.config.copilot.url, { waitUntil: 'load', settleMs: 3000 });
+    }
 
-    // opencli IPage 没有 url() 方法，通过 evaluate 获取
+    // 获取实际 URL（可能被重定向）
     const url = (await page.evaluate(() => window.location.href)) as string;
     if (!isAuthenticated(url)) {
       throw new Error(
         'AUTH_EXPIRED: 请在弹出的浏览器中手动完成 MFA 登录，然后重新运行命令。',
       );
     }
-
-    // 注入流式监听脚本
-    await page.evaluate(OBSERVER_SCRIPT);
   }
 
   /**
    * 导航到 Copilot 并注入 Prompt。
-   * 优先使用 CSS 属性选择器（ARIA），data-tid fallback 兜底。
+   * 1. 检测 Copilot 按钮 → 点击打开 Copilot 面板
+   * 2. 连接 Copilot 跨域 iframe（outlook.office.com）
+   * 3. 在 iframe 中注入 MutationObserver 监听脚本
+   * 4. 定位 iframe 中的 contentEditable 输入框并注入 Prompt
    */
   async triggerCopilotAndInput(prompt: string): Promise<void> {
-    // 点击 Copilot 入口
+    const page = this.adapter.getPage();
+    if (!page) throw new Error('[CopilotRuntime] Page not initialized');
+
+    // 等待页面稳定
+    await new Promise(r => setTimeout(r, 2000));
+
+    // 点击左侧菜单栏 Copilot 按钮打开对话面板（iframe）。
+    // 即使页面已经显示 Copilot 标题，也必须点击才能触发 iframe 加载。
+    console.log('[CopilotRuntime] Clicking Copilot sidebar button...');
     try {
-      await this.adapter.click('button[aria-label*="Copilot"]');
+      await this.adapter.click('button[aria-label*="Copilot (Ctrl+Shift+6)"]');
     } catch {
       try {
-        await this.adapter.click('[data-tid="app-bar-copilot-icon"]');
+        await this.adapter.click('button[aria-label*="Copilot"]');
       } catch {
-        console.log('[CopilotRuntime] Copilot entry not found, assuming already open.');
+        throw new Error(
+          'COPILOT_UNAVAILABLE: 无法找到左侧菜单栏的 Copilot 按钮。请手动点击后重试。',
+        );
       }
     }
 
-    // 等待输入框可用（CSS 选择器，非 Playwright role 语法）
-    await this.adapter.waitForSelector(
-      this.config.copilot.inputSelector,
-      15000,
-    );
+    // 等待 iframe 加载
+    console.log('[CopilotRuntime] Waiting for Copilot iframe...');
+    await new Promise(r => setTimeout(r, 5000));
 
-    // 注入 Prompt
-    await this.adapter.injectPrompt(prompt, this.config.copilot.inputSelector);
+    // 连接到 Copilot 跨域 iframe
+    await this.adapter.connectToCopilotIframe();
+
+    // Copilot iframe 中的输入框选择器（contentEditable span）
+    const iframeInputSelector = this.config.copilot.inputSelector;
+
+    // 等待 iframe 中的输入框可用
+    await this.adapter.waitForSelector(iframeInputSelector, 15000);
+
+    // 注入 Prompt（优先使用 iframe）
+    await this.adapter.injectPrompt(prompt, iframeInputSelector);
 
     // 发送
+    console.log('[CopilotRuntime] Prompt sent, waiting for response...');
     await this.adapter.send();
   }
 
@@ -103,6 +124,12 @@ export class CopilotRuntime {
 
     const timeout = this.config.copilot.timeout;
 
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    let truncationRetries = 0;
+    const MAX_TRUNCATION_RETRIES = 3;
+
     while (true) {
       try {
         await this.adapter.waitForStreamingEnd(timeout);
@@ -121,11 +148,13 @@ export class CopilotRuntime {
 
           // 检测截断：末尾无标点，或代码块未闭合
           const isTruncated =
-            !/[.?!。？！\n`]{1,2}$/.test(finalText.trim()) ||
-            (finalText.split('```').length % 2 === 0);
+            truncationRetries < MAX_TRUNCATION_RETRIES &&
+            (!/[.?!。？！\n`]{1,2}$/.test(finalText.trim()) ||
+            (finalText.split('```').length % 2 === 0));
 
           if (isTruncated) {
-            console.log('[CopilotRuntime] Detected truncation, sending continue prompt...');
+            truncationRetries++;
+            console.log(`[CopilotRuntime] Detected truncation (retry ${truncationRetries}/${MAX_TRUNCATION_RETRIES}), sending continue prompt...`);
             await this.adapter.injectPrompt(
               '请严格从你断开的地方继续输出，不要重复已输出的内容，不要任何前缀。',
               this.config.copilot.inputSelector,
