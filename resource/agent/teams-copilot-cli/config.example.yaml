@@ -1,0 +1,16 @@
+# Copy to config.yaml when you need to override defaults.
+browser:
+  # Optional. If omitted, the CLI prefers Chrome, then scans Edge/Chromium.
+  # path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  port: 9222
+  userDataDir: "C:\\m365-copilot-profile"
+
+copilot:
+  copilotUrl: "https://m365.cloud.microsoft/chat"
+  requestMode: "auto"
+  responseMode: "auto"
+  timeouts:
+    pageLoad: 30000
+    copilotLoad: 15000
+    streaming: 120000
+    pollingInterval: 500

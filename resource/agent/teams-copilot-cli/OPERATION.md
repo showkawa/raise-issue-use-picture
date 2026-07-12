@@ -1,171 +1,163 @@
-# Teams Copilot CLI — 操作手册
+# Microsoft 365 Copilot CLI 操作手册
 
-> 基于 @jackwener/opencli 的 Teams Copilot 自动化 CLI。
-> 将 Teams Copilot 变成你的 AI Coding + Agent 后端。
-
----
-
-## 1. 前置条件
-
-| 条件 | 说明 |
-|------|------|
-| **Node.js >= 20** 或 Bun | 运行时 |
-| **Microsoft Edge** | 安装在默认路径 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` |
-| **Microsoft 365 账号** | 有 Teams Copilot 许可（需手动 MFA 登录一次） |
-| **磁盘空间** | `C:\teams-copilot-profile` 约 200MB（独立浏览器 Profile） |
-
----
-
-## 2. 安装
+## 1. 安装
 
 ```bash
 cd resource/agent/teams-copilot-cli
-bun install
+npm install
+npm run build
 ```
 
----
+要求 Node.js 20+，并安装 Microsoft Edge、Google Chrome 或 Chromium。
+
+## 2. 登录
+
+CLI 会通过 CDP 启动或连接浏览器，直接访问 `https://m365.cloud.microsoft/chat`，并复用 `browser.userDataDir` 对应的登录态。首次使用时，请在该浏览器 Profile 中登录 Microsoft 365 Copilot 并完成 MFA。
+
+若要复用已经打开的 Chrome 标签页，请先完全退出普通 Chrome，再用 PowerShell 启动 Debug 模式：
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="$env:USERPROFILE\.m365-copilot\chrome-profile"
+```
+
+随后在该 Chrome 中打开 Copilot Chat。CLI 会优先复用已有的 `/chat` 或 `/chat/conversation/...` 标签页。
+
+CLI 不存储 Microsoft 密码、Cookie 或 MFA 信息。
 
 ## 3. 配置
 
-编辑 `config.yaml`，确认 Edge 路径和端口正确：
-
-```yaml
-edge:
-  executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-  userDataDir: "C:\\teams-copilot-profile"
-  debuggingPort: 9222
-
-copilot:
-  url: "https://teams.microsoft.com"
-  inputSelector: "[data-tid='messageInputEditor'], [role='textbox'], [aria-label*='message']"
-  timeout: 90000
-```
-
----
-
-## 4. 四条命令 — Coding & Agent 能力展示
-
-### 4.1 `ask` — 自由问答（Coding 能力）
-
-向 Teams Copilot 发送任意问题，获取代码、方案、解释。
+默认配置可直接运行。需要覆盖时，复制 `config.example.yaml`，然后通过 `--config` 指定：
 
 ```bash
-bun run cli/ask.ts "用 TypeScript 写一个防抖函数，带泛型和完整注释"
+teams-copilot --config C:\path\to\config.yaml ask "你好"
 ```
 
-**预期输出**：终端直接打印 Copilot 回复的完整代码。
+推荐使用简短命令 `tcc`；原来的 `teams-copilot` 仍作为兼容别名保留：
 
----
+```powershell
+tcc "你好"
+tcc ask "你好"
+```
 
-### 4.2 `prd` — 生成 PRD（Agent 能力：需求分析）
+以上两条命令等价。
 
-输入项目名，自动生成一份结构化的产品需求文档。
+也可用 `TEAMS_COPILOT_BROWSER` 指定浏览器可执行文件。未指定时优先使用 Chrome，再扫描 Edge 和 Chromium。
+
+旧版 `edge.executablePath`、`edge.debuggingPort`、`copilot.inputSelector` 配置仍兼容。
+
+`copilot.responseMode` 控制回复读取方式：
+
+- `auto`：默认值，优先监听浏览器内 Copilot SignalR/WebSocket 回复，失败时回退 DOM 轮询。
+- `signalr`：强制使用 SignalR/WebSocket 回复捕获。
+- `dom`：只使用 DOM 轮询。
+
+`copilot.requestMode` 控制 Prompt 提交方式：
+
+- `auto`：默认值；页面加载后的第一次请求通过编辑器发送并捕获浏览器内 SignalR 请求模板，后续请求在页面上下文中直接调用该接口。
+- `browser-api`：要求当前页面内已经捕获请求模板。
+- `dom`：始终通过编辑器和发送按钮提交。
+
+认证 WebSocket 地址和请求模板仅保留在当前页面内存中，不打印、不持久化，也不会复制到 Node 配置；页面刷新后会自动重新通过一次 DOM 请求建立模板。
+
+## 4. 命令
 
 ```bash
-bun run cli/prd.ts my-saas-app
+tcc "用 TypeScript 写一个防抖函数"
+tcc ask "用 TypeScript 写一个防抖函数"
+tcc ask "解释这段代码" --file .\src\example.ts
+tcc ask "解释这段代码" -f .\src\example.ts -o .\answer.md
+tcc review .\src\example.ts
+tcc prd demo-chat-app
+tcc arch demo-chat-app
+tcc tasks demo-chat-app
+tcc repl
 ```
 
-**流程**：
-1. 读取 `prompts/prd.md` 模板，替换 `{project_name}`
-2. 打开 Teams Copilot，注入 Prompt
-3. 等待流式输出完成（自动检测截断并续写）
-4. 清洗 AI 寒暄语，保存到 `output/PRD.md`
+- `ask`：直接问答。
+- `ask --file` / `ask --stdin`：将本地文件或标准输入包装为 Markdown 代码块后提问。
+- `review`：将本地代码文件上传到当前 Copilot Chat，并输出 Markdown 审查报告。
+- `prd`：生成 `output/PRD.md`。
+- `arch`：读取 `output/PRD.md` 并生成 `output/ARCH.md`。
+- `tasks`：读取 PRD 和 ARCH，生成 `output/TASKS.md`。
+- `repl`：复用同一个 Copilot 会话进行多轮问答。
 
----
+使用 `--no-stream` 可关闭逐步输出。
 
-### 4.3 `arch` — 生成架构设计（Agent 能力：技术设计）
+通过文件内容提问，不执行附件上传：
 
-基于 PRD 自动生成技术架构文档。
+```powershell
+tcc ask "解释这段代码在做什么" --file .\cli\tasks.ts
+tcc ask "解释这段代码在做什么" -f .\cli\tasks.ts
+```
+
+通过 PowerShell 标准输入直接提供多行代码。`ask` 会自动读取非空管道输入，因此管道场景可省略 `--stdin`：
+
+```powershell
+Get-Content -Raw .\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
+
+@'
+const value = 1;
+console.log(value);
+'@ | tcc ask "解释这段代码" --stdin --language typescript
+```
+
+在 Bash 中可使用带引号的 heredoc，源码中的单引号和 `<project-name>` 不会再被 Shell 解析：
 
 ```bash
-bun run cli/arch.ts my-saas-app
+tcc ask "解释这段代码" --language typescript < ./cli/tasks.ts
+
+tcc ask "解释这段代码" --stdin --language typescript <<'CODE'
+import path from 'node:path';
+const usage = '<project-name>';
+CODE
 ```
 
-**依赖**：必须先运行 `prd` 生成 `output/PRD.md`。
+保存回答：
 
----
+```powershell
+tcc ask "解释这段代码" -f .\cli\tasks.ts -o .\answer.md
+```
 
-### 4.4 `tasks` — 生成任务拆解（Agent 能力：项目管理）
+上传代码并将报告同时保存到本地：
 
-基于 PRD + 架构设计，拆解为可执行开发任务。
+```powershell
+tcc --no-stream review .\src\example.ts --output .\review.md
+tcc --no-stream review .\src\example.ts -o .\review.md
+```
+
+Copilot 页面原生支持的代码扩展名会直接上传；`.ts` 等未列入页面上传白名单的文本代码会以临时的 `.txt` 附件名上传，Prompt 会注明原始文件名，本地文件不会被重命名或修改。空文件和二进制文件会被拒绝。代码内容会发送到 Microsoft 365 Copilot，请只上传账号有权共享的文件。
+
+REPL 内置命令：
+
+```text
+/help
+/clear
+/stream on
+/stream off
+/exit
+```
+
+## 5. 验证
 
 ```bash
-bun run cli/tasks.ts my-saas-app
+npm run typecheck
+npm test
+npm run build
+npm pack --dry-run
 ```
 
-**依赖**：必须先运行 `prd` 和 `arch`。
+## 6. 故障排查
 
----
+| 错误 | 处理 |
+|---|---|
+| `No Chromium browser found` | 设置 `TEAMS_COPILOT_BROWSER` 或 `browser.path` |
+| `AUTH_EXPIRED` | 在配置的浏览器 Profile 中重新登录 Microsoft 365 Copilot |
+| `Microsoft 365 Copilot chat input not found` | 确认当前标签页为 Copilot Chat；必要时更新 selectors |
+| `Failed to inject prompt` | 更新 `inputArea` selector，确认输入框可编辑 |
+| `No SignalR assistant response was captured` | 使用默认 `auto` 或临时切到 `copilot.responseMode: "dom"` |
+| `Browser API request failed` | 使用默认 `auto` 自动回退；刷新页面后先执行一次请求以重新捕获模板 |
+| `Microsoft 365 Copilot file upload failed: TooManyRequests` | 等待 Microsoft Graph 限流恢复后重试；减少连续上传次数 |
+| `did not finish attaching` | 检查 Copilot 上传权限、OneDrive 状态、文件类型和网络 |
+| Response truncated | 增加 `timeouts.streaming`，检查网络和 Copilot 状态 |
 
-## 5. 首次运行 — 认证流程
-
-```
-[OpenCLIAdapter] Starting new Edge instance...
-[OpenCLIAdapter] Browser connection established.
-[CopilotRuntime] Copilot entry not found, assuming already open.
-
-→ Edge 浏览器弹出 → 手动完成 Microsoft MFA 登录 → 浏览器保持在 Teams 页面 → CLI 自动继续
-```
-
-**重要**：
-- 登录后不要关闭 Edge 窗口，CLI 会自动注入 Prompt
-- 登录态被检测到失效时抛出 `AUTH_EXPIRED`（退出码 77），手动重登后重新运行
-- 流式输出超时抛出 `STREAMING_TIMEOUT`（退出码 88）
-
----
-
-## 6. 运行时行为
-
-| 阶段 | 说明 |
-|------|------|
-| 初始化 | 检测 9222 端口，有则复用，无则启动新 Edge |
-| 会话检测 | 导航到 Teams，检查 URL 是否被重定向到登录页 |
-| Prompt 注入 | CSS 选择器定位输入框 → 聚焦 → 原生 setter 注入文本 → Enter 发送 |
-| 流式监听 | MutationObserver 监听 Copilot 回复区的 DOM 变化，拼接完整 Markdown |
-| 截断检测 | 无句末标点 or 代码块未闭合 → 自动发送 "请继续" |
-| 结果清洗 | 去除 "好的，这是您的..." / "是否需要我继续?" 等废话 |
-
----
-
-## 7. 验证步骤（确认一切就绪）
-
-```bash
-# 1. 检查依赖
-bun install --frozen-lockfile
-
-# 2. TypeScript 编译检查
-bun run typecheck
-
-# 3. 测试 Edge 路径
-ls "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-
-# 4. 确认端口未被占用
-netstat -ano | findstr 9222
-```
-
----
-
-## 8. 演示流程
-
-以下演示 Coding + Agent 能力：
-
-```bash
-# Step 1: Coding 能力 — 生成代码
-bun run cli/ask.ts "用 TypeScript 写一个 EventEmitter 类，支持 once 和 off"
-
-# Step 2-4: Agent 能力 — 完整规划链路
-bun run cli/prd.ts demo-chat-app     # 生成 PRD
-bun run cli/arch.ts demo-chat-app    # 生成架构（依赖 PRD）
-bun run cli/tasks.ts demo-chat-app   # 生成任务拆解（依赖 PRD+ARCH）
-```
-
----
-
-## 9. 故障排查
-
-| 错误 | 原因 | 解决 |
-|------|------|------|
-| `AUTH_EXPIRED` (77) | 登录态失效 | 在弹出浏览器中重新登录 Teams |
-| `STREAMING_TIMEOUT` (88) | Copilot 响应超时 | 检查网络或增加 `config.yaml` 中 `timeout` |
-| `CDP port not ready` | Edge 启动失败 | 检查 Edge 路径，关闭所有 Edge 进程后重试 |
-| `Element not found` | Teams UI 更新 | 更新 `config.yaml` 中 `inputSelector` |
+Microsoft 365 Copilot 页面结构可能随 Microsoft 更新而变化。只在有权限的账号和工作区中使用，并人工审阅生成内容。
