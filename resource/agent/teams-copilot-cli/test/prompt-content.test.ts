@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { Readable } from 'stream';
 import {
   buildCodePrompt,
   inferCodeLanguage,
+  readDelimitedQuestion,
   readTextFile,
   writeTextOutput,
 } from '../src/cli/prompt-content.js';
@@ -69,5 +71,36 @@ describe('file text helpers', () => {
 
     expect(resolvedPath).toBe(outputPath);
     expect(readTextFile(outputPath)).toBe('answer\n');
+  });
+});
+
+describe('readDelimitedQuestion', () => {
+  it('preserves multiline code and shell-sensitive characters', async () => {
+    const input = Readable.from([
+      'Explain this code\n',
+      "import { writeFileSync } from 'fs';\n",
+      'const message = `cost: "$5"`;\n',
+      '@\n',
+    ]);
+
+    await expect(readDelimitedQuestion(input)).resolves.toBe(
+      'Explain this code\n'
+      + "import { writeFileSync } from 'fs';\n"
+      + 'const message = `cost: "$5"`;',
+    );
+  });
+
+  it('requires the closing marker', async () => {
+    const input = Readable.from(['incomplete prompt\n']);
+
+    await expect(readDelimitedQuestion(input)).rejects.toThrow(
+      'Multiline prompt must end with @ on its own line',
+    );
+  });
+
+  it('rejects an empty multiline prompt', async () => {
+    const input = Readable.from(['@\n']);
+
+    await expect(readDelimitedQuestion(input)).rejects.toThrow('Multiline prompt is empty');
   });
 });

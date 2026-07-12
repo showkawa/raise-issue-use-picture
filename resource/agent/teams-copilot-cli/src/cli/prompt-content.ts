@@ -1,6 +1,6 @@
-import { extname, resolve } from 'path';
-import { dirname } from 'path';
+import { dirname, extname, resolve } from 'path';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { createInterface } from 'readline';
 import type { Stats } from 'fs';
 
 const LANGUAGES: Record<string, string> = {
@@ -89,6 +89,35 @@ export async function readStandardInput(required = true): Promise<string> {
     throw new Error('No stdin content received; pipe text into tcc or use --file');
   }
   return content;
+}
+
+export async function readDelimitedQuestion(
+  input: NodeJS.ReadableStream = process.stdin,
+  terminator = '@',
+): Promise<string> {
+  if (input === process.stdin && process.stdin.isTTY) {
+    process.stderr.write(`Enter the multiline prompt; finish with ${terminator} on its own line.\n`);
+  }
+
+  const lines: string[] = [];
+  let terminated = false;
+  const reader = createInterface({ input, crlfDelay: Infinity, terminal: false });
+  for await (const line of reader) {
+    if (line === terminator) {
+      terminated = true;
+      break;
+    }
+    lines.push(line);
+  }
+  reader.close();
+
+  if (!terminated) {
+    throw new Error(`Multiline prompt must end with ${terminator} on its own line`);
+  }
+  if (lines.length === 0) {
+    throw new Error('Multiline prompt is empty');
+  }
+  return lines.join('\n');
 }
 
 export function writeTextOutput(outputPath: string, content: string): string {

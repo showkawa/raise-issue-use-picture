@@ -5,6 +5,7 @@ import { prdCommand } from './prd.js';
 import { archCommand } from './arch.js';
 import { tasksCommand } from './tasks.js';
 import { normalizeCliArgv } from './argv.js';
+import { readDelimitedQuestion } from './prompt-content.js';
 import { reviewCommand } from './review.js';
 
 const program = new Command();
@@ -20,14 +21,17 @@ program
 
 program
   .command('ask <question...>')
-  .description('Ask Copilot a question')
+  .description('Ask Copilot a question; use "tcc @" for multiline input')
   .option('-f, --file <path>', 'Append a local text file as a Markdown code block')
   .option('--stdin', 'Read piped text from stdin and append it as a Markdown code block')
   .option('-l, --language <name>', 'Override the Markdown code fence language')
   .option('-o, --output <path>', 'Save the response to a local file')
   .action(async (question: string[], opts) => {
     const globalOpts = program.opts();
-    await askCommand(question.join(' '), { ...globalOpts, ...opts });
+    const prompt = question.length === 1 && question[0] === '@'
+      ? await readDelimitedQuestion()
+      : question.join(' ');
+    await askCommand(prompt, { ...globalOpts, ...opts });
   });
 
 program

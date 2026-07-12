@@ -9,6 +9,11 @@ describe('normalizeCliArgv', () => {
       .toEqual([...prefix, 'ask', 'write', 'a', 'function']);
   });
 
+  it('treats the multiline marker as the ask command', () => {
+    expect(normalizeCliArgv([...prefix, '@']))
+      .toEqual([...prefix, 'ask', '@']);
+  });
+
   it('preserves explicit commands', () => {
     expect(normalizeCliArgv([...prefix, 'prd', 'demo']))
       .toEqual([...prefix, 'prd', 'demo']);

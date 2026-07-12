@@ -72,6 +72,21 @@ Use `--no-stream` to wait for the full response before printing.
 
 ### Ask about code as inline text
 
+Enter a multiline prompt directly in either CMD or Git Bash. Run `tcc @`,
+paste any text or code, then finish with `@` on its own line:
+
+```text
+tcc @
+Explain the following TypeScript:
+import { writeFileSync } from 'fs';
+const message = `cost: "$5"`;
+@
+```
+
+The CLI reads all lines after `tcc @` itself, so quotes, dollar signs,
+backticks, redirects, and other shell-sensitive characters are preserved.
+Only a line containing exactly `@` ends the prompt.
+
 Let the CLI read a local text file and append it to the question as a fenced Markdown code block:
 
 ```bash
