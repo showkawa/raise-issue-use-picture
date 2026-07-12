@@ -64,6 +64,7 @@ tcc ask "你好"
 ```bash
 tcc "用 TypeScript 写一个防抖函数"
 tcc ask "用 TypeScript 写一个防抖函数"
+tcc @
 tcc ask "解释这段代码" --file .\src\example.ts
 tcc ask "解释这段代码" -f .\src\example.ts -o .\answer.md
 tcc review .\src\example.ts
@@ -83,17 +84,36 @@ tcc repl
 
 使用 `--no-stream` 可关闭逐步输出。
 
+`tcc ask` 会把辅助状态写入 stderr，包括浏览器连接、登录检查、Copilot
+页面准备、Prompt 提交、响应捕获和回退路径。长时间等待时每 15 秒输出
+一次已等待时间，并显示配置的超时值（默认 120 秒）；Copilot 正文仍只
+写入 stdout。
+
+在 CMD 或 Git Bash 中输入包含引号、反引号、`$`、重定向符号等特殊字符
+的多行问题时，运行 `tcc @`，粘贴文本或代码，并用单独一行 `@` 结束：
+
+```text
+tcc @
+请解释下面的 TypeScript：
+import { writeFileSync } from 'fs';
+const message = `cost: "$5"`;
+@
+```
+
+CLI 会自行读取 `tcc @` 后的每一行，因此内容不会再作为 Shell 命令参数
+解析。只有内容完全等于 `@` 的一行会结束输入。
+
 通过文件内容提问，不执行附件上传：
 
 ```powershell
-tcc ask "解释这段代码在做什么" --file .\cli\tasks.ts
-tcc ask "解释这段代码在做什么" -f .\cli\tasks.ts
+tcc ask "解释这段代码在做什么" --file .\src\cli\tasks.ts
+tcc ask "解释这段代码在做什么" -f .\src\cli\tasks.ts
 ```
 
 通过 PowerShell 标准输入直接提供多行代码。`ask` 会自动读取非空管道输入，因此管道场景可省略 `--stdin`：
 
 ```powershell
-Get-Content -Raw .\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
+Get-Content -Raw .\src\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
 
 @'
 const value = 1;
@@ -104,7 +124,7 @@ console.log(value);
 在 Bash 中可使用带引号的 heredoc，源码中的单引号和 `<project-name>` 不会再被 Shell 解析：
 
 ```bash
-tcc ask "解释这段代码" --language typescript < ./cli/tasks.ts
+tcc ask "解释这段代码" --language typescript < ./src/cli/tasks.ts
 
 tcc ask "解释这段代码" --stdin --language typescript <<'CODE'
 import path from 'node:path';
@@ -115,7 +135,7 @@ CODE
 保存回答：
 
 ```powershell
-tcc ask "解释这段代码" -f .\cli\tasks.ts -o .\answer.md
+tcc ask "解释这段代码" -f .\src\cli\tasks.ts -o .\answer.md
 ```
 
 上传代码并将报告同时保存到本地：
@@ -158,6 +178,7 @@ npm pack --dry-run
 | `Browser API request failed` | 使用默认 `auto` 自动回退；刷新页面后先执行一次请求以重新捕获模板 |
 | `Microsoft 365 Copilot file upload failed: TooManyRequests` | 等待 Microsoft Graph 限流恢复后重试；减少连续上传次数 |
 | `did not finish attaching` | 检查 Copilot 上传权限、OneDrive 状态、文件类型和网络 |
+| 命令长时间没有返回 | 查看 stderr 中最后一条 `[tcc]` 日志；每 15 秒心跳会说明当前等待阶段和已等待时间 |
 | Response truncated | 增加 `timeouts.streaming`，检查网络和 Copilot 状态 |
 
 Microsoft 365 Copilot 页面结构可能随 Microsoft 更新而变化。只在有权限的账号和工作区中使用，并人工审阅生成内容。

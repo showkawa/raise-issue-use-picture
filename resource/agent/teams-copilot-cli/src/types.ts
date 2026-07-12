@@ -47,13 +47,6 @@ export interface StreamResult {
   duration: number;
 }
 
-export interface CommandResult {
-  success: boolean;
-  output: string;
-  error?: string;
-  exitCode: number;
-}
-
 export interface AskOptions {
   onUpdate?: (chunk: string) => void;
   autoContinue?: boolean;

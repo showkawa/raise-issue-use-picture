@@ -1,6 +1,4 @@
 import { accessSync, constants } from 'fs';
-import { homedir } from 'os';
-import { join } from 'path';
 
 const WIN_PATHS = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -45,10 +43,6 @@ export function findChromiumBrowser(preferred?: string): string | null {
     if (pathExists(p)) return p;
   }
   return null;
-}
-
-export function getDefaultUserDataDir(browserName: string): string {
-  return join(homedir(), '.teams-copilot', 'profiles', browserName);
 }
 
 export function formatBrowserNotFoundError(): string {

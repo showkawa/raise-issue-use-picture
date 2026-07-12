@@ -6,7 +6,7 @@ vi.mock('fs', () => ({
 }));
 
 import { accessSync } from 'fs';
-import { findChromiumBrowser, getDefaultUserDataDir } from '../src/runtime/browser-finder.js';
+import { findChromiumBrowser } from '../src/runtime/browser-finder.js';
 
 describe('findChromiumBrowser', () => {
   const originalPlatform = process.platform;
@@ -35,13 +35,5 @@ describe('findChromiumBrowser', () => {
   it('returns null when no browser found', () => {
     vi.mocked(accessSync).mockImplementation(() => { throw new Error('ENOENT'); });
     expect(findChromiumBrowser()).toBeNull();
-  });
-});
-
-describe('getDefaultUserDataDir', () => {
-  it('returns correct path', () => {
-    const dir = getDefaultUserDataDir('edge');
-    expect(dir).toContain('.teams-copilot');
-    expect(dir).toContain('edge');
   });
 });
