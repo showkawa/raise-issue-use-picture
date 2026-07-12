@@ -26,8 +26,11 @@ node dist/cli/index.js ask "Summarize this project"
 When installed as a package, use:
 
 ```bash
-teams-copilot ask "Summarize this project"
+tcc "Summarize this project"
 ```
+
+`tcc <question>` is shorthand for `tcc ask <question>`. The previous
+`teams-copilot` executable remains available as a compatibility alias.
 
 ## Configuration
 
@@ -52,11 +55,12 @@ The authenticated WebSocket URL and request template remain in page memory. The 
 ## Commands
 
 ```bash
-teams-copilot ask "Question"
-teams-copilot prd "Project Name"
-teams-copilot arch "Project Name"
-teams-copilot tasks "Project Name"
-teams-copilot repl
+tcc "Question"
+tcc ask "Question"
+tcc prd "Project Name"
+tcc arch "Project Name"
+tcc tasks "Project Name"
+tcc repl
 ```
 
 `prd`, `arch`, and `tasks` write Markdown files to `output/`. `arch` requires `output/PRD.md`; `tasks` requires both `output/PRD.md` and `output/ARCH.md`.

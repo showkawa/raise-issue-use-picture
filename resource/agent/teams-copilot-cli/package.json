@@ -4,6 +4,7 @@
   "description": "Microsoft 365 Copilot CLI — AI Coding assistant via browser automation",
   "type": "module",
   "bin": {
+    "tcc": "./dist/cli/index.js",
     "teams-copilot": "./dist/cli/index.js"
   },
   "files": [

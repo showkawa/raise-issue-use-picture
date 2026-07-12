@@ -4,11 +4,12 @@ import { askCommand } from './ask.js';
 import { prdCommand } from './prd.js';
 import { archCommand } from './arch.js';
 import { tasksCommand } from './tasks.js';
+import { normalizeCliArgv } from './argv.js';
 
 const program = new Command();
 
 program
-  .name('teams-copilot')
+  .name('tcc')
   .description('Microsoft 365 Copilot CLI — AI Coding assistant via browser automation')
   .version('2.0.0')
   .option('--config <path>', 'Path to config.yaml')
@@ -57,7 +58,7 @@ program
   });
 
 try {
-  await program.parseAsync();
+  await program.parseAsync(normalizeCliArgv(process.argv));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`Error: ${message}\n`);

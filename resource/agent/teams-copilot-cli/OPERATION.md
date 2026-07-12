@@ -32,6 +32,15 @@ CLI 不存储 Microsoft 密码、Cookie 或 MFA 信息。
 teams-copilot --config C:\path\to\config.yaml ask "你好"
 ```
 
+推荐使用简短命令 `tcc`；原来的 `teams-copilot` 仍作为兼容别名保留：
+
+```powershell
+tcc "你好"
+tcc ask "你好"
+```
+
+以上两条命令等价。
+
 也可用 `TEAMS_COPILOT_BROWSER` 指定浏览器可执行文件。未指定时优先使用 Chrome，再扫描 Edge 和 Chromium。
 
 旧版 `edge.executablePath`、`edge.debuggingPort`、`copilot.inputSelector` 配置仍兼容。
@@ -53,11 +62,12 @@ teams-copilot --config C:\path\to\config.yaml ask "你好"
 ## 4. 命令
 
 ```bash
-teams-copilot ask "用 TypeScript 写一个防抖函数"
-teams-copilot prd demo-chat-app
-teams-copilot arch demo-chat-app
-teams-copilot tasks demo-chat-app
-teams-copilot repl
+tcc "用 TypeScript 写一个防抖函数"
+tcc ask "用 TypeScript 写一个防抖函数"
+tcc prd demo-chat-app
+tcc arch demo-chat-app
+tcc tasks demo-chat-app
+tcc repl
 ```
 
 - `ask`：直接问答。
