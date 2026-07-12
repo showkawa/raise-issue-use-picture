@@ -1,1 +1,0 @@
-TEAMS_COPILOT_BROWSER env var override works
