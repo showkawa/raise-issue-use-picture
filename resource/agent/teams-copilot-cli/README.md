@@ -58,6 +58,7 @@ The authenticated WebSocket URL and request template remain in page memory. The 
 tcc "Question"
 tcc ask "Question"
 tcc ask "Explain this code" --file ./src/example.ts
+tcc ask "Explain this code" -f ./src/example.ts -o ./answer.md
 tcc review ./src/example.ts
 tcc prd "Project Name"
 tcc arch "Project Name"
@@ -75,12 +76,15 @@ Let the CLI read a local text file and append it to the question as a fenced Mar
 
 ```bash
 tcc ask "Explain what this code does" --file ./src/example.ts
+tcc ask "Explain what this code does" -f ./src/example.ts
 tcc ask "Find correctness issues" --file ./src/example.ts --language typescript
 ```
 
-Pipe text without creating a file:
+Pipe text without creating a file. `ask` automatically reads non-empty stdin, so `--stdin` is optional for pipelines:
 
 ```bash
+tcc ask "Explain this code" --language typescript < ./src/example.ts
+cat ./src/example.ts | tcc ask "Explain this code" --language typescript
 tcc ask "Explain this code" --stdin --language typescript <<'CODE'
 const value = 1;
 console.log(value);
@@ -89,11 +93,18 @@ CODE
 
 The quoted heredoc delimiter prevents shell characters such as single quotes, backticks, and `<project-name>` from being interpreted by Bash. For large files, use `tcc review <file>` instead of inline text; Copilot prompt-length limits vary by tenant.
 
+Save the answer locally:
+
+```bash
+tcc ask "Explain this code" -f ./src/example.ts -o ./answer.md
+```
+
 ### Review a local code file
 
 ```bash
 tcc review ./src/example.ts
 tcc --no-stream review ./src/example.ts --output ./review.md
+tcc --no-stream review ./src/example.ts -o ./review.md
 ```
 
 `review` uploads the file through the existing authenticated Copilot Chat page, asks Copilot for a Markdown code review, and prints the response. `--output` also saves the final report locally.

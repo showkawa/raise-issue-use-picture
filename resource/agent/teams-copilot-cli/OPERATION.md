@@ -65,6 +65,7 @@ tcc ask "你好"
 tcc "用 TypeScript 写一个防抖函数"
 tcc ask "用 TypeScript 写一个防抖函数"
 tcc ask "解释这段代码" --file .\src\example.ts
+tcc ask "解释这段代码" -f .\src\example.ts -o .\answer.md
 tcc review .\src\example.ts
 tcc prd demo-chat-app
 tcc arch demo-chat-app
@@ -86,11 +87,14 @@ tcc repl
 
 ```powershell
 tcc ask "解释这段代码在做什么" --file .\cli\tasks.ts
+tcc ask "解释这段代码在做什么" -f .\cli\tasks.ts
 ```
 
-通过 PowerShell 标准输入直接提供多行代码：
+通过 PowerShell 标准输入直接提供多行代码。`ask` 会自动读取非空管道输入，因此管道场景可省略 `--stdin`：
 
 ```powershell
+Get-Content -Raw .\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
+
 @'
 const value = 1;
 console.log(value);
@@ -100,16 +104,25 @@ console.log(value);
 在 Bash 中可使用带引号的 heredoc，源码中的单引号和 `<project-name>` 不会再被 Shell 解析：
 
 ```bash
+tcc ask "解释这段代码" --language typescript < ./cli/tasks.ts
+
 tcc ask "解释这段代码" --stdin --language typescript <<'CODE'
 import path from 'node:path';
 const usage = '<project-name>';
 CODE
 ```
 
+保存回答：
+
+```powershell
+tcc ask "解释这段代码" -f .\cli\tasks.ts -o .\answer.md
+```
+
 上传代码并将报告同时保存到本地：
 
 ```powershell
 tcc --no-stream review .\src\example.ts --output .\review.md
+tcc --no-stream review .\src\example.ts -o .\review.md
 ```
 
 Copilot 页面原生支持的代码扩展名会直接上传；`.ts` 等未列入页面上传白名单的文本代码会以临时的 `.txt` 附件名上传，Prompt 会注明原始文件名，本地文件不会被重命名或修改。空文件和二进制文件会被拒绝。代码内容会发送到 Microsoft 365 Copilot，请只上传账号有权共享的文件。

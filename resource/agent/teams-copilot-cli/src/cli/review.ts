@@ -1,8 +1,8 @@
-import { dirname, resolve } from 'path';
-import { mkdirSync, writeFileSync } from 'fs';
+import { resolve } from 'path';
 import { createRuntime } from '../runtime/copilot-runtime.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
+import { writeTextOutput } from './prompt-content.js';
 
 const REVIEW_PROMPT = [
   '请审查附件中的代码文件。',
@@ -35,9 +35,7 @@ export async function reviewCommand(
       process.stdout.write(`${result.text}\n`);
     }
     if (opts.output) {
-      const outputPath = resolve(opts.output);
-      mkdirSync(dirname(outputPath), { recursive: true });
-      writeFileSync(outputPath, result.text, 'utf8');
+      const outputPath = writeTextOutput(opts.output, result.text);
       process.stderr.write(`Review saved to ${outputPath}\n`);
     }
     if (result.truncated) {

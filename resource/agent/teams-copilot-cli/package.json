@@ -1,6 +1,6 @@
 {
   "name": "teams-copilot-cli",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Microsoft 365 Copilot CLI — AI Coding assistant via browser automation",
   "type": "module",
   "bin": {

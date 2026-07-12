@@ -1,5 +1,6 @@
 import { extname, resolve } from 'path';
-import { readFileSync, statSync } from 'fs';
+import { dirname } from 'path';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import type { Stats } from 'fs';
 
 const LANGUAGES: Record<string, string> = {
@@ -76,12 +77,23 @@ export function readTextFile(filePath: string): string {
   return readFileSync(absolutePath, 'utf8');
 }
 
-export async function readStandardInput(): Promise<string> {
+export async function readStandardInput(required = true): Promise<string> {
   if (process.stdin.isTTY) {
+    if (!required) return '';
     throw new Error('No stdin content received; pipe text into tcc or use --file');
   }
   process.stdin.setEncoding('utf8');
   let content = '';
   for await (const chunk of process.stdin) content += chunk;
+  if (required && !content) {
+    throw new Error('No stdin content received; pipe text into tcc or use --file');
+  }
   return content;
+}
+
+export function writeTextOutput(outputPath: string, content: string): string {
+  const resolvedPath = resolve(outputPath);
+  mkdirSync(dirname(resolvedPath), { recursive: true });
+  writeFileSync(resolvedPath, content, 'utf8');
+  return resolvedPath;
 }

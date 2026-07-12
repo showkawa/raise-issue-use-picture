@@ -6,6 +6,7 @@ import {
   buildCodePrompt,
   inferCodeLanguage,
   readTextFile,
+  writeTextOutput,
 } from '../src/cli/prompt-content.js';
 
 const directories: string[] = [];
@@ -57,5 +58,16 @@ describe('file text helpers', () => {
   it('reports a missing local text file clearly', () => {
     expect(() => readTextFile('/missing/tcc-example.ts'))
       .toThrow('Text file not found');
+  });
+
+  it('writes text output and creates parent directories', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'tcc-output-'));
+    directories.push(directory);
+    const outputPath = join(directory, 'nested', 'answer.md');
+
+    const resolvedPath = writeTextOutput(outputPath, 'answer\n');
+
+    expect(resolvedPath).toBe(outputPath);
+    expect(readTextFile(outputPath)).toBe('answer\n');
   });
 });
