@@ -1,0 +1,15 @@
+# Copy to config.yaml when you need to override defaults.
+browser:
+  # Optional. If omitted, the CLI scans common Edge/Chrome/Chromium paths.
+  # path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  port: 9222
+  userDataDir: "C:\\teams-copilot-profile"
+
+copilot:
+  teamsUrl: "https://teams.microsoft.com/"
+  copilotUrl: "https://teams.microsoft.com/v2/"
+  timeouts:
+    pageLoad: 30000
+    copilotLoad: 15000
+    streaming: 120000
+    pollingInterval: 500

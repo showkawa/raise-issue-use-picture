@@ -3,3 +3,5 @@ output/
 .env
 debug-*.mjs
 dist/
+test-results/
+playwright-report/
