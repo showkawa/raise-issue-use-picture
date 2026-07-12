@@ -26,7 +26,7 @@ async function runRepl(session: CopilotSession, initialStream: boolean): Promise
     prompt: 'copilot> ',
   });
 
-  console.log('Teams Copilot CLI v2 — Type /help for commands, /exit to quit\n');
+  console.log('Microsoft 365 Copilot CLI v2 — Type /help for commands, /exit to quit\n');
 
   rl.on('SIGINT', () => rl.close());
   rl.on('line', (line) => {

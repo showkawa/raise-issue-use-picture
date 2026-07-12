@@ -9,7 +9,7 @@ const program = new Command();
 
 program
   .name('teams-copilot')
-  .description('Teams Copilot CLI — AI Coding assistant via browser automation')
+  .description('Microsoft 365 Copilot CLI — AI Coding assistant via browser automation')
   .version('2.0.0')
   .option('--config <path>', 'Path to config.yaml')
   .option('--browser <path>', 'Browser executable path')

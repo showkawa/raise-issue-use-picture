@@ -10,14 +10,12 @@ const DEFAULTS: AppConfig = {
     userDataDir: join(homedir(), '.teams-copilot', 'profile'),
   },
   copilot: {
-    teamsUrl: 'https://teams.microsoft.com/',
-    copilotUrl: 'https://teams.microsoft.com/v2/',
+    copilotUrl: 'https://m365.cloud.microsoft/chat',
     selectors: {
-      inputArea: '[contenteditable="true"], [role="textbox"], textarea[aria-label*="message"], textarea[aria-label*="消息"]',
-      sendButton: 'button[aria-label*="Send"], button[aria-label*="发送"], button[type="submit"]',
-      responseContainer: '[data-content="ai-message"], [data-tid="chat-pane-message"], [data-tid="chat-window"], [role="log"], [aria-live="polite"]',
-      copilotEntry: 'button[aria-label*="Copilot"], a[aria-label*="Copilot"], [data-tid*="copilot"], [aria-label*="Microsoft 365 Copilot"]',
-      loginIndicator: '[data-tid="login"], input[type="email"], input[name="loginfmt"]',
+      inputArea: '#m365-chat-editor-target-element, [role="textbox"][contenteditable="true"][aria-label*="Copilot"], [role="textbox"][contenteditable="true"][aria-label*="消息"]',
+      sendButton: 'button[type="submit"][aria-label*="Send"], button[type="submit"][aria-label*="发送"], button[aria-label*="Send message"], button[aria-label*="发送消息"]',
+      responseContainer: '[data-testid="lastChatMessage"] [data-testid="markdown-reply"], [data-testid="lastChatMessage"], [data-testid="markdown-reply"], [data-content="ai-message"]',
+      loginIndicator: 'input[type="email"], input[name="loginfmt"], input[type="password"], input[name="passwd"], [data-tid="sign-in-button"]',
     },
     timeouts: {
       pageLoad: 30000,
@@ -50,7 +48,6 @@ function definedEntries<T extends Record<string, unknown>>(value: T): Partial<T>
 }
 
 function validate(config: AppConfig): void {
-  if (!config.copilot.teamsUrl) throw new Error('Missing required field: copilot.teamsUrl');
   if (!config.copilot.copilotUrl) throw new Error('Missing required field: copilot.copilotUrl');
   if (
     !Number.isInteger(config.browser.port)
@@ -107,8 +104,7 @@ export function loadConfig(configPath?: string): AppConfig {
     );
     const legacyCopilot = hasLegacyCopilot && rawCopilot
       ? {
-          ...definedEntries({
-            teamsUrl: rawCopilot.url,
+        ...definedEntries({
             copilotUrl: rawCopilot.url,
           }),
           selectors: definedEntries({

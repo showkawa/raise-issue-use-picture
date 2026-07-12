@@ -1,13 +1,12 @@
 # Copy to config.yaml when you need to override defaults.
 browser:
-  # Optional. If omitted, the CLI scans common Edge/Chrome/Chromium paths.
-  # path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  # Optional. If omitted, the CLI prefers Chrome, then scans Edge/Chromium.
+  # path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
   port: 9222
-  userDataDir: "C:\\teams-copilot-profile"
+  userDataDir: "C:\\m365-copilot-profile"
 
 copilot:
-  teamsUrl: "https://teams.microsoft.com/"
-  copilotUrl: "https://teams.microsoft.com/v2/"
+  copilotUrl: "https://m365.cloud.microsoft/chat"
   timeouts:
     pageLoad: 30000
     copilotLoad: 15000

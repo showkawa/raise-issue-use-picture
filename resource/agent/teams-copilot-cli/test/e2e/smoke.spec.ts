@@ -69,8 +69,8 @@ test.describe('E2E Smoke', () => {
     const browser = await connectToBrowser(actualPort);
     try {
       const page = await browser.newPage();
-      await page.goto('data:text/html,<title>Teams Copilot E2E</title>');
-      await expect(page).toHaveTitle('Teams Copilot E2E');
+      await page.goto('data:text/html,<title>M365 Copilot E2E</title>');
+      await expect(page).toHaveTitle('M365 Copilot E2E');
       await page.close();
     } finally {
       await closeBrowser(browser);
@@ -87,8 +87,6 @@ test.describe('E2E Smoke', () => {
     expect(typeof config.browser.userDataDir).toBe('string');
 
     expect(config.copilot).toBeDefined();
-    expect(typeof config.copilot.teamsUrl).toBe('string');
-    expect(config.copilot.teamsUrl.length).toBeGreaterThan(0);
     expect(typeof config.copilot.copilotUrl).toBe('string');
     expect(config.copilot.copilotUrl.length).toBeGreaterThan(0);
 

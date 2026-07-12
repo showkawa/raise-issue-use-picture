@@ -3,21 +3,21 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 const WIN_PATHS = [
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
 ];
 
 const MAC_PATHS = [
-  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
 ];
 
 const LINUX_PATHS = [
-  '/usr/bin/microsoft-edge',
-  '/usr/bin/microsoft-edge-stable',
   '/usr/bin/google-chrome',
   '/usr/bin/google-chrome-stable',
+  '/usr/bin/microsoft-edge',
+  '/usr/bin/microsoft-edge-stable',
   '/usr/bin/chromium-browser',
   '/usr/bin/chromium',
 ];

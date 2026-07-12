@@ -1,7 +1,7 @@
 {
   "name": "teams-copilot-cli",
   "version": "2.0.0",
-  "description": "Teams Copilot CLI — AI Coding assistant via Teams Copilot browser automation",
+  "description": "Microsoft 365 Copilot CLI — AI Coding assistant via browser automation",
   "type": "module",
   "bin": {
     "teams-copilot": "./dist/cli/index.js"
@@ -17,7 +17,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "dev": "tsc --watch",
     "test": "node scripts/run-vitest.mjs run",
     "test:e2e": "npm run build && playwright test",

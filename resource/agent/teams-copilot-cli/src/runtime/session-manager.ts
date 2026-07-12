@@ -6,7 +6,7 @@ import {
   closeBrowser,
   terminateBrowserProcess,
 } from './browser-adapter.js';
-import { TeamsPage } from './teams-page.js';
+import { CopilotPage } from './copilot-page.js';
 import { injectText } from './text-injector.js';
 import { extractStream, readResponseText } from './stream-extractor.js';
 import { sanitizeMarkdown } from './markdown-sanitizer.js';
@@ -20,7 +20,7 @@ export class SessionManager {
   private config: AppConfig;
   private browser: Browser | null = null;
   private page: Page | null = null;
-  private teamsPage: TeamsPage | null = null;
+  private copilotPage: CopilotPage | null = null;
   private browserPid = 0;
 
   constructor(config?: AppConfig) {
@@ -38,29 +38,39 @@ export class SessionManager {
       throw error;
     }
     const context = this.browser.contexts()[0] ?? await this.browser.newContext();
-    this.page = context.pages()[0] ?? await context.newPage();
-    this.teamsPage = new TeamsPage(this.page, this.config.copilot);
+    const target = new URL(this.config.copilot.copilotUrl);
+    this.page = context.pages().find((page) => {
+      try {
+        const url = new URL(page.url());
+        const targetPath = target.pathname.replace(/\/+$/, '');
+        const currentPath = url.pathname.replace(/\/+$/, '');
+        return url.origin === target.origin
+          && (currentPath === targetPath || currentPath.startsWith(`${targetPath}/`));
+      } catch {
+        return false;
+      }
+    }) ?? context.pages()[0] ?? await context.newPage();
+    this.copilotPage = new CopilotPage(this.page, this.config.copilot);
   }
 
   async createSession(): Promise<CopilotSession> {
-    if (!this.teamsPage) throw new Error('Not initialized');
-    await this.teamsPage.goto();
-    if (!(await this.teamsPage.isLoggedIn())) {
-      process.stderr.write('Waiting up to 2 minutes for Teams sign-in...\n');
-      if (!(await this.teamsPage.waitForLogin())) {
-        const authError = this.teamsPage.getAuthError();
+    if (!this.copilotPage) throw new Error('Not initialized');
+    await this.copilotPage.goto();
+    if (!(await this.copilotPage.isLoggedIn())) {
+      process.stderr.write('Waiting up to 2 minutes for Microsoft 365 Copilot sign-in...\n');
+      if (!(await this.copilotPage.waitForLogin())) {
+        const authError = this.copilotPage.getAuthError();
         const message = authError
           ? `Microsoft authentication failed: ${authError}`
-          : 'Authentication expired. Please log in to Teams.';
+          : 'Authentication expired. Please log in to Microsoft 365 Copilot.';
         throw Object.assign(new Error(message), {
           code: 'AUTH_EXPIRED',
           exitCode: ERROR_CODES.AUTH_EXPIRED,
         });
       }
     }
-    await this.teamsPage.navigateToCopilot();
-    const frame = await this.teamsPage.getCopilotFrame();
-    await this.teamsPage.waitForReady(frame);
+    const frame = await this.copilotPage.getChatFrame();
+    await this.copilotPage.waitForReady(frame);
 
     return {
       ask: async (prompt: string, options: AskOptions = {}): Promise<StreamResult> => {
@@ -98,7 +108,7 @@ export class SessionManager {
     } finally {
       this.browser = null;
       this.page = null;
-      this.teamsPage = null;
+      this.copilotPage = null;
       terminateBrowserProcess(this.browserPid);
       this.browserPid = 0;
     }

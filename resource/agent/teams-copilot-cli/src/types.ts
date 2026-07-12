@@ -8,7 +8,6 @@ export interface CopilotSelectors {
   inputArea: string;
   sendButton: string;
   responseContainer: string;
-  copilotEntry: string;
   loginIndicator: string;
 }
 
@@ -20,7 +19,6 @@ export interface CopilotTimeouts {
 }
 
 export interface CopilotConfig {
-  teamsUrl: string;
   copilotUrl: string;
   selectors: CopilotSelectors;
   timeouts: CopilotTimeouts;

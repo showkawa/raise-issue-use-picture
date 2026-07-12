@@ -1,14 +1,14 @@
-# Teams Copilot CLI
+# Microsoft 365 Copilot CLI
 
-Command-line helper that drives Microsoft Teams Copilot through a local Chromium/Edge browser via Playwright CDP.
+Command-line helper that drives Microsoft 365 Copilot Chat at `https://m365.cloud.microsoft/chat` through a local Chrome/Chromium browser via Playwright CDP.
 
 ## Requirements
 
 - Node.js 20+
-- Microsoft Edge, Chrome, or Chromium
-- A Teams account with Copilot access
+- Google Chrome, Microsoft Edge, or Chromium
+- A Microsoft 365 account with Copilot Chat access
 
-The CLI does not manage Microsoft authentication. It reuses the browser profile configured in `browser.userDataDir`; sign in to Teams in that profile before running generation commands.
+The CLI does not manage Microsoft authentication. It reuses the browser profile configured in `browser.userDataDir`; sign in to Microsoft 365 Copilot in that profile before running generation commands. If the configured CDP port already belongs to a browser with an open Copilot Chat tab, the CLI reuses that tab without navigating away from the conversation.
 
 ## Install and build
 
@@ -33,7 +33,7 @@ teams-copilot ask "Summarize this project"
 
 The CLI reads `config.yaml` from the current working directory unless `--config <path>` is provided. If no browser path is configured, it checks `TEAMS_COPILOT_BROWSER` and common Edge/Chrome/Chromium install paths.
 
-Legacy v1 config files using `edge.executablePath`, `edge.debuggingPort`, and `copilot.inputSelector` are still accepted.
+`copilot.copilotUrl` defaults to `https://m365.cloud.microsoft/chat`. Legacy v1 config files using `edge.executablePath`, `edge.debuggingPort`, and `copilot.inputSelector` are still accepted.
 
 ## Commands
 
@@ -51,4 +51,4 @@ Use `--no-stream` to wait for the full response before printing.
 
 ## Disclaimer
 
-This tool automates the Teams web UI. Microsoft may change selectors, iframe URLs, rate limits, or authentication behavior without notice. Use it only with accounts and workspaces you are authorized to access, and review generated documents before relying on them.
+This tool automates the Microsoft 365 Copilot web UI. Microsoft may change selectors, URLs, rate limits, or authentication behavior without notice. Use it only with accounts and workspaces you are authorized to access, and review generated documents before relying on them.

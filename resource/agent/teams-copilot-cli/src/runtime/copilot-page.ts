@@ -1,7 +1,7 @@
 import type { CopilotConfig } from '../types.js';
 import type { Page, Frame } from 'playwright-core';
 
-export class TeamsPage {
+export class CopilotPage {
   private page: Page;
   private config: CopilotConfig;
 
@@ -11,31 +11,25 @@ export class TeamsPage {
   }
 
   async goto(): Promise<void> {
-    await this.page.goto(this.config.teamsUrl, {
+    if (this.isCopilotUrl(this.page.url())) {
+      await this.page.waitForLoadState('domcontentloaded', {
+        timeout: this.config.timeouts.pageLoad,
+      }).catch(() => undefined);
+      return;
+    }
+
+    await this.page.goto(this.config.copilotUrl, {
       waitUntil: 'domcontentloaded',
       timeout: this.config.timeouts.pageLoad,
     });
-    await this.page.waitForLoadState('domcontentloaded', { timeout: this.config.timeouts.pageLoad }).catch(() => undefined);
+    await this.page.waitForLoadState('domcontentloaded', {
+      timeout: this.config.timeouts.pageLoad,
+    }).catch(() => undefined);
   }
 
   async isLoggedIn(): Promise<boolean> {
     await this.page.waitForTimeout(1000);
-    const teamsUrl = new URL(this.config.teamsUrl);
-    let currentUrl = new URL(this.page.url());
-    if (
-      currentUrl.hostname === teamsUrl.hostname
-      && currentUrl.pathname.replace(/\/+$/, '') !== teamsUrl.pathname.replace(/\/+$/, '')
-    ) {
-      await this.page.waitForURL((url) => {
-        const hostname = url.hostname.toLowerCase();
-        return hostname === 'login.microsoftonline.com'
-          || hostname.endsWith('.login.microsoftonline.com')
-          || hostname === 'login.live.com'
-          || url.hash.includes('error=')
-          || url.searchParams.has('error');
-      }, { timeout: 5000 }).catch(() => undefined);
-      currentUrl = new URL(this.page.url());
-    }
+    const currentUrl = new URL(this.page.url());
     if (this.getAuthError()) return false;
     const hostname = currentUrl.hostname.toLowerCase();
     if (
@@ -46,19 +40,16 @@ export class TeamsPage {
     ) {
       return false;
     }
-    if (
-      currentUrl.hostname === teamsUrl.hostname
-      && currentUrl.pathname.replace(/\/+$/, '') === teamsUrl.pathname.replace(/\/+$/, '')
-    ) {
+
+    try {
+      if (await this.page.locator(this.config.selectors.loginIndicator).first().isVisible()) {
+        return false;
+      }
+    } catch {
       return false;
     }
-    try {
-      const loginEl = await this.page.$(this.config.selectors.loginIndicator);
-      if (loginEl) return false;
-    } catch {
-      // Element not found = logged in
-    }
-    return true;
+
+    return this.isCopilotUrl(currentUrl.toString());
   }
 
   async waitForLogin(timeout = 120000): Promise<boolean> {
@@ -80,19 +71,10 @@ export class TeamsPage {
       ?? fragment.get('error');
   }
 
-  async navigateToCopilot(): Promise<void> {
-    const existingFrame = await this.findFrameWithInput(1000);
-    if (existingFrame) return;
-
-    await this.page.locator(this.config.selectors.copilotEntry).first().click({
-      timeout: this.config.timeouts.copilotLoad,
-    });
-  }
-
-  async getCopilotFrame(): Promise<Frame> {
+  async getChatFrame(): Promise<Frame> {
     const frame = await this.findFrameWithInput(this.config.timeouts.copilotLoad);
     if (!frame) {
-      throw Object.assign(new Error('Copilot iframe not found. Cross-origin access may require fallback.'), {
+      throw Object.assign(new Error('Microsoft 365 Copilot chat input not found.'), {
         code: 'IFRAME_ACCESS_FAILED',
       });
     }
@@ -110,17 +92,28 @@ export class TeamsPage {
     const deadline = Date.now() + timeout;
     while (Date.now() <= deadline) {
       for (const frame of this.page.frames()) {
-        if (frame === this.page.mainFrame()) continue;
         try {
-          const inputCount = await frame.locator(this.config.selectors.inputArea).count();
-          const sendButtonCount = await frame.locator(this.config.selectors.sendButton).count();
-          if (inputCount > 0 && sendButtonCount > 0) return frame;
+          const input = frame.locator(this.config.selectors.inputArea).first();
+          if (await input.isVisible()) return frame;
         } catch {
-          // Cross-origin or detached frames can fail while Teams is loading.
+          // Detached frames can fail while Microsoft 365 Copilot is loading.
         }
       }
       await this.page.waitForTimeout(300);
     }
     return null;
+  }
+
+  private isCopilotUrl(value: string): boolean {
+    try {
+      const target = new URL(this.config.copilotUrl);
+      const current = new URL(value);
+      const targetPath = target.pathname.replace(/\/+$/, '');
+      const currentPath = current.pathname.replace(/\/+$/, '');
+      return current.origin === target.origin
+        && (currentPath === targetPath || currentPath.startsWith(`${targetPath}/`));
+    } catch {
+      return false;
+    }
   }
 }

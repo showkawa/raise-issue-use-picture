@@ -21,11 +21,11 @@ describe('loadConfig', () => {
   });
 
   it('parses a valid config.yaml', async () => {
-    writeFileSync(TEST_CONFIG_PATH, 'browser:\n  port: 9333\ncopilot:\n  teamsUrl: "https://test.example.com"\n  copilotUrl: "https://test.example.com/copilot"\n');
+    writeFileSync(TEST_CONFIG_PATH, 'browser:\n  port: 9333\ncopilot:\n  copilotUrl: "https://test.example.com/copilot"\n');
     const { loadConfig } = await import('../src/runtime/config.js');
     const config = loadConfig(TEST_CONFIG_PATH);
     expect(config.browser.port).toBe(9333);
-    expect(config.copilot.teamsUrl).toBe('https://test.example.com');
+    expect(config.copilot.copilotUrl).toBe('https://test.example.com/copilot');
   });
 
   it('uses defaults for an empty config file', async () => {
@@ -53,7 +53,7 @@ describe('loadConfig', () => {
     expect(config.browser.path).toBe('/custom/edge');
     expect(config.browser.port).toBe(9555);
     expect(config.browser.userDataDir).toBe('/tmp/profile');
-    expect(config.copilot.teamsUrl).toBe('https://teams.example.com');
+    expect(config.copilot.copilotUrl).toBe('https://teams.example.com');
     expect(config.copilot.selectors.inputArea).toBe('.input');
     expect(config.copilot.selectors.sendButton).toBe('.send');
     expect(config.copilot.selectors.responseContainer).toBe('.message');
@@ -61,7 +61,7 @@ describe('loadConfig', () => {
   });
 
   it('throws when copilot section has empty required fields', async () => {
-    writeFileSync(TEST_CONFIG_PATH, 'browser:\n  port: 9333\ncopilot:\n  teamsUrl: ""\n');
+    writeFileSync(TEST_CONFIG_PATH, 'browser:\n  port: 9333\ncopilot:\n  copilotUrl: ""\n');
     const { loadConfig } = await import('../src/runtime/config.js');
     expect(() => loadConfig(TEST_CONFIG_PATH)).toThrow('Missing required field');
   });
