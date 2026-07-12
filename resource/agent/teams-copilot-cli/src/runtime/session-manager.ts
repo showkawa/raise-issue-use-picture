@@ -1,4 +1,10 @@
-import type { AppConfig, AskOptions, CopilotSession, StreamResult } from '../types.js';
+import type {
+  AppConfig,
+  AskOptions,
+  CopilotSession,
+  RuntimeStatusHandler,
+  StreamResult,
+} from '../types.js';
 import { loadConfig } from './config.js';
 import {
   launchBrowser,
@@ -23,21 +29,51 @@ const ERROR_CODES = {
   AUTH_EXPIRED: 77,
 } as const;
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function withHeartbeat<T>(
+  operation: Promise<T>,
+  onStatus: RuntimeStatusHandler | undefined,
+  message: string,
+): Promise<T> {
+  if (!onStatus) return operation;
+  const start = Date.now();
+  const timer = setInterval(() => {
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    onStatus(`${message} (${elapsed}s elapsed)`);
+  }, 15000);
+  timer.unref();
+  try {
+    return await operation;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 export class SessionManager {
   private config: AppConfig;
   private browser: Browser | null = null;
   private page: Page | null = null;
   private copilotPage: CopilotPage | null = null;
   private browserPid = 0;
+  private onStatus?: RuntimeStatusHandler;
 
-  constructor(config?: AppConfig) {
+  constructor(config?: AppConfig, onStatus?: RuntimeStatusHandler) {
     this.config = config ?? loadConfig();
+    this.onStatus = onStatus;
   }
 
   async init(): Promise<void> {
+    this.report(`Checking browser on CDP port ${this.config.browser.port}...`);
     const { port, pid } = await launchBrowser(this.config.browser);
     this.browserPid = pid;
+    this.report(pid === 0
+      ? `Using the browser already running on port ${port}.`
+      : `Browser started on port ${port}.`);
     try {
+      this.report('Connecting Playwright to the browser...');
       this.browser = await connectToBrowser(port);
     } catch (error) {
       terminateBrowserProcess(this.browserPid);
@@ -58,13 +94,16 @@ export class SessionManager {
       }
     }) ?? context.pages()[0] ?? await context.newPage();
     this.copilotPage = new CopilotPage(this.page, this.config.copilot);
+    this.report('Browser connection is ready.');
   }
 
   async createSession(): Promise<CopilotSession> {
     if (!this.copilotPage) throw new Error('Not initialized');
+    this.report('Opening Microsoft 365 Copilot...');
     await this.copilotPage.goto();
+    this.report('Checking Microsoft sign-in...');
     if (!(await this.copilotPage.isLoggedIn())) {
-      process.stderr.write('Waiting up to 2 minutes for Microsoft 365 Copilot sign-in...\n');
+      this.report('Waiting up to 2 minutes for Microsoft 365 Copilot sign-in...');
       if (!(await this.copilotPage.waitForLogin())) {
         const authError = this.copilotPage.getAuthError();
         const message = authError
@@ -76,9 +115,16 @@ export class SessionManager {
         });
       }
     }
+    this.report(
+      `Locating the Copilot chat input (timeout ${Math.round(
+        this.config.copilot.timeouts.copilotLoad / 1000,
+      )}s)...`,
+    );
     const frame = await this.copilotPage.getChatFrame();
     await this.copilotPage.waitForReady(frame);
+    this.report('Preparing the authenticated response bridge...');
     await installBrowserApiBridge(this.page ?? frame.page());
+    this.report('Copilot chat is ready.');
 
     return {
       ask: async (prompt: string, options: AskOptions = {}): Promise<StreamResult> => {
@@ -155,23 +201,36 @@ export class SessionManager {
   ): Promise<StreamResult> {
     if (!forceDom && this.config.copilot.requestMode !== 'dom') {
       try {
-        const browserApiResult = await askWithBrowserApi(
-          this.page ?? frame.page(),
-          prompt,
-          this.config.copilot.timeouts.streaming,
-          this.config.copilot.timeouts.pollingInterval,
-          options.onUpdate,
+        this.report(
+          `Submitting through the browser API (timeout ${Math.round(
+            this.config.copilot.timeouts.streaming / 1000,
+          )}s)...`,
+        );
+        const browserApiResult = await withHeartbeat(
+          askWithBrowserApi(
+            this.page ?? frame.page(),
+            prompt,
+            this.config.copilot.timeouts.streaming,
+            this.config.copilot.timeouts.pollingInterval,
+            options.onUpdate,
+          ),
+          this.onStatus,
+          'Still waiting for the browser API response',
         );
         if (browserApiResult) return browserApiResult;
+        this.report('Browser API template is not ready; switching to the page editor.');
       } catch (error) {
         if (this.config.copilot.requestMode === 'browser-api') throw error;
+        this.report(`Browser API unavailable: ${errorMessage(error)}. Switching to the page editor.`);
       }
     }
 
+    this.report('Preparing response capture from the Copilot page...');
     const baseline = await readResponseText(frame, this.config.copilot.selectors.responseContainer);
     const signalRStream = this.config.copilot.responseMode === 'dom'
       ? null
       : await createSignalRStream(this.page ?? frame.page(), this.config.copilot, options.onUpdate);
+    this.report('Entering the prompt in the Copilot editor...');
     const injection = await injectText(frame, prompt, this.config.copilot.selectors.inputArea);
     if (!injection.success) {
       await signalRStream?.dispose();
@@ -180,16 +239,46 @@ export class SessionManager {
       });
     }
 
+    this.report('Sending the prompt...');
     await this.sendPrompt(frame);
     try {
-      if (signalRStream) return await signalRStream.wait();
-      return await this.extractFromDom(frame, baseline, options);
+      if (signalRStream) {
+        this.report(
+          `Waiting for the Copilot response (timeout ${Math.round(
+            this.config.copilot.timeouts.streaming / 1000,
+          )}s)...`,
+        );
+        return await withHeartbeat(
+          signalRStream.wait(),
+          this.onStatus,
+          'Still waiting for the Copilot response',
+        );
+      }
+      return await this.extractFromDomWithStatus(frame, baseline, options);
     } catch (error) {
       if (this.config.copilot.responseMode === 'signalr') throw error;
-      return this.extractFromDom(frame, baseline, options);
+      this.report(`SignalR response unavailable: ${errorMessage(error)}. Reading the page instead.`);
+      return this.extractFromDomWithStatus(frame, baseline, options);
     } finally {
       await signalRStream?.dispose();
     }
+  }
+
+  private extractFromDomWithStatus(
+    frame: Frame,
+    baseline: string,
+    options: AskOptions,
+  ): Promise<StreamResult> {
+    this.report(
+      `Reading the response from the page (timeout ${Math.round(
+        this.config.copilot.timeouts.streaming / 1000,
+      )}s)...`,
+    );
+    return withHeartbeat(
+      this.extractFromDom(frame, baseline, options),
+      this.onStatus,
+      'Still waiting for the page response',
+    );
   }
 
   private extractFromDom(
@@ -211,5 +300,9 @@ export class SessionManager {
       await frame.locator(this.config.copilot.selectors.inputArea).first().click({ timeout: 5000 });
       await frame.page().keyboard.press('Enter');
     }
+  }
+
+  private report(message: string): void {
+    this.onStatus?.(message);
   }
 }

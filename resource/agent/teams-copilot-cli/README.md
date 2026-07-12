@@ -70,7 +70,28 @@ tcc repl
 
 Use `--no-stream` to wait for the full response before printing.
 
+Status messages are written to stderr while the CLI connects to the browser,
+opens Copilot, submits the prompt, and waits for a response. Long waits print
+an elapsed-time heartbeat every 15 seconds and include the configured timeout,
+so a stalled browser or Copilot request is visible without mixing diagnostics
+into the response on stdout.
+
 ### Ask about code as inline text
+
+Enter a multiline prompt directly in either CMD or Git Bash. Run `tcc @`,
+paste any text or code, then finish with `@` on its own line:
+
+```text
+tcc @
+Explain the following TypeScript:
+import { writeFileSync } from 'fs';
+const message = `cost: "$5"`;
+@
+```
+
+The CLI reads all lines after `tcc @` itself, so quotes, dollar signs,
+backticks, redirects, and other shell-sensitive characters are preserved.
+Only a line containing exactly `@` ends the prompt.
 
 Let the CLI read a local text file and append it to the question as a fenced Markdown code block:
 

@@ -60,6 +60,8 @@ export interface AskOptions {
   maxContinuations?: number;
 }
 
+export type RuntimeStatusHandler = (message: string) => void;
+
 export interface CopilotSession {
   ask(prompt: string, options?: AskOptions): Promise<StreamResult>;
   askWithFile(filePath: string, prompt: string, options?: AskOptions): Promise<StreamResult>;
