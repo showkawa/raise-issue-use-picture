@@ -7,6 +7,10 @@
 
 copilot:
   copilotUrl: "https://m365.cloud.microsoft/chat"
+  # auto: use the in-page browser API after a DOM request has captured its template.
+  # browser-api: require an already-captured in-page API template.
+  # dom: always submit through the page editor.
+  requestMode: "auto"
   # auto: prefer browser SignalR frames for responses, then fall back to DOM.
   # signalr: require browser SignalR response capture.
   # dom: use DOM polling only.

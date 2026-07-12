@@ -19,9 +19,11 @@ export interface CopilotTimeouts {
 }
 
 export type CopilotResponseMode = 'auto' | 'signalr' | 'dom';
+export type CopilotRequestMode = 'auto' | 'browser-api' | 'dom';
 
 export interface CopilotConfig {
   copilotUrl: string;
+  requestMode: CopilotRequestMode;
   responseMode: CopilotResponseMode;
   selectors: CopilotSelectors;
   timeouts: CopilotTimeouts;

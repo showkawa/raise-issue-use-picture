@@ -41,7 +41,13 @@ The CLI reads `config.yaml` from the current working directory unless `--config 
 - `signalr`: require SignalR/WebSocket response capture.
 - `dom`: use DOM polling only.
 
-The CLI still submits prompts through the signed-in browser page so Microsoft tokens, cookies, and MFA state stay inside Chrome.
+`copilot.requestMode` controls how prompts are submitted:
+
+- `auto` (default): install an in-page WebSocket bridge. The first request after a page load uses the editor and captures the browser's authenticated SignalR request template; later requests use that template directly inside the page.
+- `browser-api`: require an already-captured in-page request template.
+- `dom`: always use the editor and send button.
+
+The authenticated WebSocket URL and request template remain in page memory. The CLI does not print, persist, or copy Microsoft tokens or cookies into Node configuration.
 
 ## Commands
 

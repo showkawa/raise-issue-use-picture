@@ -42,7 +42,13 @@ teams-copilot --config C:\path\to\config.yaml ask "你好"
 - `signalr`：强制使用 SignalR/WebSocket 回复捕获。
 - `dom`：只使用 DOM 轮询。
 
-当前实现仍通过已登录页面提交 Prompt，认证 Token、Cookie 和 MFA 状态保留在 Chrome 内，不写入配置或日志。
+`copilot.requestMode` 控制 Prompt 提交方式：
+
+- `auto`：默认值；页面加载后的第一次请求通过编辑器发送并捕获浏览器内 SignalR 请求模板，后续请求在页面上下文中直接调用该接口。
+- `browser-api`：要求当前页面内已经捕获请求模板。
+- `dom`：始终通过编辑器和发送按钮提交。
+
+认证 WebSocket 地址和请求模板仅保留在当前页面内存中，不打印、不持久化，也不会复制到 Node 配置；页面刷新后会自动重新通过一次 DOM 请求建立模板。
 
 ## 4. 命令
 
@@ -90,6 +96,7 @@ npm pack --dry-run
 | `Microsoft 365 Copilot chat input not found` | 确认当前标签页为 Copilot Chat；必要时更新 selectors |
 | `Failed to inject prompt` | 更新 `inputArea` selector，确认输入框可编辑 |
 | `No SignalR assistant response was captured` | 使用默认 `auto` 或临时切到 `copilot.responseMode: "dom"` |
+| `Browser API request failed` | 使用默认 `auto` 自动回退；刷新页面后先执行一次请求以重新捕获模板 |
 | Response truncated | 增加 `timeouts.streaming`，检查网络和 Copilot 状态 |
 
 Microsoft 365 Copilot 页面结构可能随 Microsoft 更新而变化。只在有权限的账号和工作区中使用，并人工审阅生成内容。

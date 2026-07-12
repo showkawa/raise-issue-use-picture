@@ -11,6 +11,7 @@ const DEFAULTS: AppConfig = {
   },
   copilot: {
     copilotUrl: 'https://m365.cloud.microsoft/chat',
+    requestMode: 'auto',
     responseMode: 'auto',
     selectors: {
       inputArea: '#m365-chat-editor-target-element, [role="textbox"][contenteditable="true"][aria-label*="Copilot"], [role="textbox"][contenteditable="true"][aria-label*="消息"]',
@@ -136,6 +137,13 @@ export function loadConfig(configPath?: string): AppConfig {
         },
       },
     };
+    if (
+      config.copilot.requestMode !== 'auto'
+      && config.copilot.requestMode !== 'browser-api'
+      && config.copilot.requestMode !== 'dom'
+    ) {
+      throw new Error('Invalid field: copilot.requestMode');
+    }
     if (
       config.copilot.responseMode !== 'auto'
       && config.copilot.responseMode !== 'signalr'

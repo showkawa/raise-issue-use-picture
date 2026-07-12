@@ -26,7 +26,14 @@ describe('loadConfig', () => {
     const config = loadConfig(TEST_CONFIG_PATH);
     expect(config.browser.port).toBe(9333);
     expect(config.copilot.copilotUrl).toBe('https://test.example.com/copilot');
+    expect(config.copilot.requestMode).toBe('auto');
     expect(config.copilot.responseMode).toBe('auto');
+  });
+
+  it('parses a configured request mode', async () => {
+    writeFileSync(TEST_CONFIG_PATH, 'copilot:\n  requestMode: "browser-api"\n');
+    const { loadConfig } = await import('../src/runtime/config.js');
+    expect(loadConfig(TEST_CONFIG_PATH).copilot.requestMode).toBe('browser-api');
   });
 
   it('parses a configured response mode', async () => {
@@ -77,6 +84,12 @@ describe('loadConfig', () => {
     writeFileSync(TEST_CONFIG_PATH, 'copilot:\n  responseMode: "api"\n');
     const { loadConfig } = await import('../src/runtime/config.js');
     expect(() => loadConfig(TEST_CONFIG_PATH)).toThrow('Invalid field: copilot.responseMode');
+  });
+
+  it('rejects an invalid request mode', async () => {
+    writeFileSync(TEST_CONFIG_PATH, 'copilot:\n  requestMode: "api"\n');
+    const { loadConfig } = await import('../src/runtime/config.js');
+    expect(() => loadConfig(TEST_CONFIG_PATH)).toThrow('Invalid field: copilot.requestMode');
   });
 });
 

@@ -10,6 +10,7 @@ import { CopilotPage } from './copilot-page.js';
 import { injectText } from './text-injector.js';
 import { extractStream, readResponseText } from './stream-extractor.js';
 import { createSignalRStream } from './signalr-stream.js';
+import { askWithBrowserApi, installBrowserApiBridge } from './browser-api-bridge.js';
 import { sanitizeMarkdown } from './markdown-sanitizer.js';
 import type { Browser, Frame, Page } from 'playwright-core';
 
@@ -72,6 +73,7 @@ export class SessionManager {
     }
     const frame = await this.copilotPage.getChatFrame();
     await this.copilotPage.waitForReady(frame);
+    await installBrowserApiBridge(this.page ?? frame.page());
 
     return {
       ask: async (prompt: string, options: AskOptions = {}): Promise<StreamResult> => {
@@ -120,6 +122,21 @@ export class SessionManager {
     prompt: string,
     options: AskOptions,
   ): Promise<StreamResult> {
+    if (this.config.copilot.requestMode !== 'dom') {
+      try {
+        const browserApiResult = await askWithBrowserApi(
+          this.page ?? frame.page(),
+          prompt,
+          this.config.copilot.timeouts.streaming,
+          this.config.copilot.timeouts.pollingInterval,
+          options.onUpdate,
+        );
+        if (browserApiResult) return browserApiResult;
+      } catch (error) {
+        if (this.config.copilot.requestMode === 'browser-api') throw error;
+      }
+    }
+
     const baseline = await readResponseText(frame, this.config.copilot.selectors.responseContainer);
     const signalRStream = this.config.copilot.responseMode === 'dom'
       ? null

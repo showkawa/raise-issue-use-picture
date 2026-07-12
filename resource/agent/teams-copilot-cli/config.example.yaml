@@ -7,6 +7,7 @@ browser:
 
 copilot:
   copilotUrl: "https://m365.cloud.microsoft/chat"
+  requestMode: "auto"
   responseMode: "auto"
   timeouts:
     pageLoad: 30000

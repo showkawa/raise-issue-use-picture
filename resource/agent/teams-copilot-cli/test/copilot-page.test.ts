@@ -4,6 +4,7 @@ import type { CopilotConfig } from '../src/types.js';
 
 const config: CopilotConfig = {
   copilotUrl: 'https://m365.cloud.microsoft/chat',
+  requestMode: 'auto',
   responseMode: 'auto',
   selectors: {
     inputArea: '.input',
