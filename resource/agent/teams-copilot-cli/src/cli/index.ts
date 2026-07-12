@@ -12,7 +12,7 @@ const program = new Command();
 program
   .name('tcc')
   .description('Microsoft 365 Copilot CLI — AI Coding assistant via browser automation')
-  .version('2.0.1')
+  .version('2.0.2')
   .option('--config <path>', 'Path to config.yaml')
   .option('--browser <path>', 'Browser executable path')
   .option('--port <number>', 'CDP debugging port')
@@ -21,6 +21,9 @@ program
 program
   .command('ask <question...>')
   .description('Ask Copilot a question')
+  .option('-f, --file <path>', 'Append a local text file as a Markdown code block')
+  .option('--stdin', 'Read piped text from stdin and append it as a Markdown code block')
+  .option('-l, --language <name>', 'Override the Markdown code fence language')
   .action(async (question: string[], opts) => {
     const globalOpts = program.opts();
     await askCommand(question.join(' '), { ...globalOpts, ...opts });

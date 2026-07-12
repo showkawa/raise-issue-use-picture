@@ -57,6 +57,7 @@ The authenticated WebSocket URL and request template remain in page memory. The 
 ```bash
 tcc "Question"
 tcc ask "Question"
+tcc ask "Explain this code" --file ./src/example.ts
 tcc review ./src/example.ts
 tcc prd "Project Name"
 tcc arch "Project Name"
@@ -67,6 +68,26 @@ tcc repl
 `prd`, `arch`, and `tasks` write Markdown files to `output/`. `arch` requires `output/PRD.md`; `tasks` requires both `output/PRD.md` and `output/ARCH.md`.
 
 Use `--no-stream` to wait for the full response before printing.
+
+### Ask about code as inline text
+
+Let the CLI read a local text file and append it to the question as a fenced Markdown code block:
+
+```bash
+tcc ask "Explain what this code does" --file ./src/example.ts
+tcc ask "Find correctness issues" --file ./src/example.ts --language typescript
+```
+
+Pipe text without creating a file:
+
+```bash
+tcc ask "Explain this code" --stdin --language typescript <<'CODE'
+const value = 1;
+console.log(value);
+CODE
+```
+
+The quoted heredoc delimiter prevents shell characters such as single quotes, backticks, and `<project-name>` from being interpreted by Bash. For large files, use `tcc review <file>` instead of inline text; Copilot prompt-length limits vary by tenant.
 
 ### Review a local code file
 

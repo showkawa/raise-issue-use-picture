@@ -64,6 +64,7 @@ tcc ask "你好"
 ```bash
 tcc "用 TypeScript 写一个防抖函数"
 tcc ask "用 TypeScript 写一个防抖函数"
+tcc ask "解释这段代码" --file .\src\example.ts
 tcc review .\src\example.ts
 tcc prd demo-chat-app
 tcc arch demo-chat-app
@@ -72,6 +73,7 @@ tcc repl
 ```
 
 - `ask`：直接问答。
+- `ask --file` / `ask --stdin`：将本地文件或标准输入包装为 Markdown 代码块后提问。
 - `review`：将本地代码文件上传到当前 Copilot Chat，并输出 Markdown 审查报告。
 - `prd`：生成 `output/PRD.md`。
 - `arch`：读取 `output/PRD.md` 并生成 `output/ARCH.md`。
@@ -79,6 +81,30 @@ tcc repl
 - `repl`：复用同一个 Copilot 会话进行多轮问答。
 
 使用 `--no-stream` 可关闭逐步输出。
+
+通过文件内容提问，不执行附件上传：
+
+```powershell
+tcc ask "解释这段代码在做什么" --file .\cli\tasks.ts
+```
+
+通过 PowerShell 标准输入直接提供多行代码：
+
+```powershell
+@'
+const value = 1;
+console.log(value);
+'@ | tcc ask "解释这段代码" --stdin --language typescript
+```
+
+在 Bash 中可使用带引号的 heredoc，源码中的单引号和 `<project-name>` 不会再被 Shell 解析：
+
+```bash
+tcc ask "解释这段代码" --stdin --language typescript <<'CODE'
+import path from 'node:path';
+const usage = '<project-name>';
+CODE
+```
 
 上传代码并将报告同时保存到本地：
 
