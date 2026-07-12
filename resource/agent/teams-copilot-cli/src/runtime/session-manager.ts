@@ -48,7 +48,11 @@ export class SessionManager {
     if (!(await this.teamsPage.isLoggedIn())) {
       process.stderr.write('Waiting up to 2 minutes for Teams sign-in...\n');
       if (!(await this.teamsPage.waitForLogin())) {
-        throw Object.assign(new Error('Authentication expired. Please log in to Teams.'), {
+        const authError = this.teamsPage.getAuthError();
+        const message = authError
+          ? `Microsoft authentication failed: ${authError}`
+          : 'Authentication expired. Please log in to Teams.';
+        throw Object.assign(new Error(message), {
           code: 'AUTH_EXPIRED',
           exitCode: ERROR_CODES.AUTH_EXPIRED,
         });

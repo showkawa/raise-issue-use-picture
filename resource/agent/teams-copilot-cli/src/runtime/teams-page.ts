@@ -21,6 +21,7 @@ export class TeamsPage {
   async isLoggedIn(): Promise<boolean> {
     await this.page.waitForTimeout(1000);
     const currentUrl = new URL(this.page.url());
+    if (this.getAuthError()) return false;
     const hostname = currentUrl.hostname.toLowerCase();
     if (
       hostname === 'login.microsoftonline.com'
@@ -49,10 +50,20 @@ export class TeamsPage {
   async waitForLogin(timeout = 120000): Promise<boolean> {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (this.getAuthError()) return false;
       if (await this.isLoggedIn()) return true;
       await this.page.waitForTimeout(1000);
     }
     return false;
+  }
+
+  getAuthError(): string | null {
+    const currentUrl = new URL(this.page.url());
+    const fragment = new URLSearchParams(currentUrl.hash.slice(1));
+    return currentUrl.searchParams.get('error_description')
+      ?? fragment.get('error_description')
+      ?? currentUrl.searchParams.get('error')
+      ?? fragment.get('error');
   }
 
   async navigateToCopilot(): Promise<void> {

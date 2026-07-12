@@ -24,6 +24,7 @@ describe('TeamsPage', () => {
   it.each([
     ['https://teams.example.com', false],
     ['https://login.microsoftonline.com/common/oauth2/authorize', false],
+    ['https://teams.example.com/v2/authv2#error=interaction_required', false],
     ['https://teams.example.com/v2/', true],
   ])('detects login state for %s', async (url, expected) => {
     const page = {
