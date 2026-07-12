@@ -9,6 +9,7 @@ import {
 import { CopilotPage } from './copilot-page.js';
 import { injectText } from './text-injector.js';
 import { extractStream, readResponseText } from './stream-extractor.js';
+import { createSignalRStream } from './signalr-stream.js';
 import { sanitizeMarkdown } from './markdown-sanitizer.js';
 import type { Browser, Frame, Page } from 'playwright-core';
 
@@ -120,17 +121,37 @@ export class SessionManager {
     options: AskOptions,
   ): Promise<StreamResult> {
     const baseline = await readResponseText(frame, this.config.copilot.selectors.responseContainer);
+    const signalRStream = this.config.copilot.responseMode === 'dom'
+      ? null
+      : await createSignalRStream(this.page ?? frame.page(), this.config.copilot, options.onUpdate);
     const injection = await injectText(frame, prompt, this.config.copilot.selectors.inputArea);
     if (!injection.success) {
+      await signalRStream?.dispose();
       throw Object.assign(new Error(`Failed to inject prompt: ${injection.error}`), {
         code: 'PROMPT_INJECTION_FAILED',
       });
     }
 
     await this.sendPrompt(frame);
+    try {
+      if (signalRStream) return await signalRStream.wait();
+      return await this.extractFromDom(frame, baseline, options);
+    } catch (error) {
+      if (this.config.copilot.responseMode === 'signalr') throw error;
+      return this.extractFromDom(frame, baseline, options);
+    } finally {
+      await signalRStream?.dispose();
+    }
+  }
+
+  private extractFromDom(
+    frame: Frame,
+    baseline: string,
+    options: AskOptions,
+  ): Promise<StreamResult> {
     return extractStream(frame, this.config.copilot, {
       baseline,
-      onUpdate: options.onUpdate,
+      onUpdate: this.config.copilot.responseMode === 'dom' ? options.onUpdate : undefined,
     });
   }
 

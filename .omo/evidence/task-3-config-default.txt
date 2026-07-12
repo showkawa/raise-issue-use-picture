@@ -1,0 +1,1 @@
+config defaults: port=9222, no crash on missing file

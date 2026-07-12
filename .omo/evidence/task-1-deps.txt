@@ -1,0 +1,1 @@
+package.json: @jackwener/opencli removed, playwright-core in peerDependencies

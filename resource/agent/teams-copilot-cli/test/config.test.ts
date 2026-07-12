@@ -26,6 +26,13 @@ describe('loadConfig', () => {
     const config = loadConfig(TEST_CONFIG_PATH);
     expect(config.browser.port).toBe(9333);
     expect(config.copilot.copilotUrl).toBe('https://test.example.com/copilot');
+    expect(config.copilot.responseMode).toBe('auto');
+  });
+
+  it('parses a configured response mode', async () => {
+    writeFileSync(TEST_CONFIG_PATH, 'copilot:\n  responseMode: "signalr"\n');
+    const { loadConfig } = await import('../src/runtime/config.js');
+    expect(loadConfig(TEST_CONFIG_PATH).copilot.responseMode).toBe('signalr');
   });
 
   it('uses defaults for an empty config file', async () => {
@@ -64,6 +71,12 @@ describe('loadConfig', () => {
     writeFileSync(TEST_CONFIG_PATH, 'browser:\n  port: 9333\ncopilot:\n  copilotUrl: ""\n');
     const { loadConfig } = await import('../src/runtime/config.js');
     expect(() => loadConfig(TEST_CONFIG_PATH)).toThrow('Missing required field');
+  });
+
+  it('rejects an invalid response mode', async () => {
+    writeFileSync(TEST_CONFIG_PATH, 'copilot:\n  responseMode: "api"\n');
+    const { loadConfig } = await import('../src/runtime/config.js');
+    expect(() => loadConfig(TEST_CONFIG_PATH)).toThrow('Invalid field: copilot.responseMode');
   });
 });
 

@@ -18,8 +18,11 @@ export interface CopilotTimeouts {
   pollingInterval: number;
 }
 
+export type CopilotResponseMode = 'auto' | 'signalr' | 'dom';
+
 export interface CopilotConfig {
   copilotUrl: string;
+  responseMode: CopilotResponseMode;
   selectors: CopilotSelectors;
   timeouts: CopilotTimeouts;
 }

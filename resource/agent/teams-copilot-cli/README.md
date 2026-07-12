@@ -35,6 +35,14 @@ The CLI reads `config.yaml` from the current working directory unless `--config 
 
 `copilot.copilotUrl` defaults to `https://m365.cloud.microsoft/chat`. Legacy v1 config files using `edge.executablePath`, `edge.debuggingPort`, and `copilot.inputSelector` are still accepted.
 
+`copilot.responseMode` controls how replies are read:
+
+- `auto` (default): read Microsoft 365 Copilot SignalR/WebSocket updates from the browser session, then fall back to DOM polling if no protocol response is captured.
+- `signalr`: require SignalR/WebSocket response capture.
+- `dom`: use DOM polling only.
+
+The CLI still submits prompts through the signed-in browser page so Microsoft tokens, cookies, and MFA state stay inside Chrome.
+
 ## Commands
 
 ```bash

@@ -11,6 +11,7 @@ const DEFAULTS: AppConfig = {
   },
   copilot: {
     copilotUrl: 'https://m365.cloud.microsoft/chat',
+    responseMode: 'auto',
     selectors: {
       inputArea: '#m365-chat-editor-target-element, [role="textbox"][contenteditable="true"][aria-label*="Copilot"], [role="textbox"][contenteditable="true"][aria-label*="消息"]',
       sendButton: 'button[type="submit"][aria-label*="Send"], button[type="submit"][aria-label*="发送"], button[aria-label*="Send message"], button[aria-label*="发送消息"]',
@@ -123,18 +124,25 @@ export function loadConfig(configPath?: string): AppConfig {
         ...DEFAULTS.copilot,
         ...legacyCopilot,
         ...raw?.copilot,
-        selectors: {
+      selectors: {
           ...DEFAULTS.copilot.selectors,
           ...(legacyCopilot as Partial<AppConfig['copilot']>).selectors,
           ...raw?.copilot?.selectors,
         },
-        timeouts: {
+      timeouts: {
           ...DEFAULTS.copilot.timeouts,
           ...(legacyCopilot as Partial<AppConfig['copilot']>).timeouts,
           ...raw?.copilot?.timeouts,
         },
       },
     };
+    if (
+      config.copilot.responseMode !== 'auto'
+      && config.copilot.responseMode !== 'signalr'
+      && config.copilot.responseMode !== 'dom'
+    ) {
+      throw new Error('Invalid field: copilot.responseMode');
+    }
     validate(config);
     return config;
   } catch (error: unknown) {

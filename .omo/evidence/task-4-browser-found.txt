@@ -1,0 +1,1 @@
+findChromiumBrowser: Windows Edge detected

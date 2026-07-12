@@ -36,6 +36,14 @@ teams-copilot --config C:\path\to\config.yaml ask "你好"
 
 旧版 `edge.executablePath`、`edge.debuggingPort`、`copilot.inputSelector` 配置仍兼容。
 
+`copilot.responseMode` 控制回复读取方式：
+
+- `auto`：默认值，优先监听浏览器内 Copilot SignalR/WebSocket 回复，失败时回退 DOM 轮询。
+- `signalr`：强制使用 SignalR/WebSocket 回复捕获。
+- `dom`：只使用 DOM 轮询。
+
+当前实现仍通过已登录页面提交 Prompt，认证 Token、Cookie 和 MFA 状态保留在 Chrome 内，不写入配置或日志。
+
 ## 4. 命令
 
 ```bash
@@ -81,6 +89,7 @@ npm pack --dry-run
 | `AUTH_EXPIRED` | 在配置的浏览器 Profile 中重新登录 Microsoft 365 Copilot |
 | `Microsoft 365 Copilot chat input not found` | 确认当前标签页为 Copilot Chat；必要时更新 selectors |
 | `Failed to inject prompt` | 更新 `inputArea` selector，确认输入框可编辑 |
+| `No SignalR assistant response was captured` | 使用默认 `auto` 或临时切到 `copilot.responseMode: "dom"` |
 | Response truncated | 增加 `timeouts.streaming`，检查网络和 Copilot 状态 |
 
 Microsoft 365 Copilot 页面结构可能随 Microsoft 更新而变化。只在有权限的账号和工作区中使用，并人工审阅生成内容。

@@ -1,0 +1,3 @@
+npm install: success (94 packages)
+npm run build: success (tsc, no errors)
+All directories exist: src/cli/, src/runtime/, test/, debug-legacy/
