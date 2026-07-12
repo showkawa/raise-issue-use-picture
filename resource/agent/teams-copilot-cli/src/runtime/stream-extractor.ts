@@ -44,13 +44,6 @@ export async function extractStream(
   return { text: lastText, truncated: true, duration: Date.now() - start };
 }
 
-export async function extractFull(
-  frame: Frame,
-  config: CopilotConfig,
-): Promise<StreamResult> {
-  return extractStream(frame, config);
-}
-
 export async function readResponseText(
   frame: Frame,
   selector: string,
