@@ -20,7 +20,22 @@ export class TeamsPage {
 
   async isLoggedIn(): Promise<boolean> {
     await this.page.waitForTimeout(1000);
-    const currentUrl = new URL(this.page.url());
+    const teamsUrl = new URL(this.config.teamsUrl);
+    let currentUrl = new URL(this.page.url());
+    if (
+      currentUrl.hostname === teamsUrl.hostname
+      && currentUrl.pathname.replace(/\/+$/, '') !== teamsUrl.pathname.replace(/\/+$/, '')
+    ) {
+      await this.page.waitForURL((url) => {
+        const hostname = url.hostname.toLowerCase();
+        return hostname === 'login.microsoftonline.com'
+          || hostname.endsWith('.login.microsoftonline.com')
+          || hostname === 'login.live.com'
+          || url.hash.includes('error=')
+          || url.searchParams.has('error');
+      }, { timeout: 5000 }).catch(() => undefined);
+      currentUrl = new URL(this.page.url());
+    }
     if (this.getAuthError()) return false;
     const hostname = currentUrl.hostname.toLowerCase();
     if (
@@ -31,7 +46,6 @@ export class TeamsPage {
     ) {
       return false;
     }
-    const teamsUrl = new URL(this.config.teamsUrl);
     if (
       currentUrl.hostname === teamsUrl.hostname
       && currentUrl.pathname.replace(/\/+$/, '') === teamsUrl.pathname.replace(/\/+$/, '')

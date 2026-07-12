@@ -30,6 +30,7 @@ describe('TeamsPage', () => {
     const page = {
       url: vi.fn(() => url),
       waitForTimeout: vi.fn(async () => undefined),
+      waitForURL: vi.fn(async () => undefined),
       $: vi.fn(async () => null),
     };
     const teamsPage = new TeamsPage(
