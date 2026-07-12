@@ -21,6 +21,24 @@ const config: CopilotConfig = {
 };
 
 describe('TeamsPage', () => {
+  it.each([
+    ['https://teams.example.com', false],
+    ['https://login.microsoftonline.com/common/oauth2/authorize', false],
+    ['https://teams.example.com/v2/', true],
+  ])('detects login state for %s', async (url, expected) => {
+    const page = {
+      url: vi.fn(() => url),
+      waitForTimeout: vi.fn(async () => undefined),
+      $: vi.fn(async () => null),
+    };
+    const teamsPage = new TeamsPage(
+      page as unknown as ConstructorParameters<typeof TeamsPage>[0],
+      config,
+    );
+
+    await expect(teamsPage.isLoggedIn()).resolves.toBe(expected);
+  });
+
   it('selects an iframe containing both input and send controls', async () => {
     const mainFrame = {
       locator: vi.fn(() => ({ count: vi.fn(async () => 1) })),

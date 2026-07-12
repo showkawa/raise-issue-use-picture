@@ -20,8 +20,23 @@ export class TeamsPage {
 
   async isLoggedIn(): Promise<boolean> {
     await this.page.waitForTimeout(1000);
-    const url = this.page.url().toLowerCase();
-    if (url.includes('login') || url.includes('signin')) return false;
+    const currentUrl = new URL(this.page.url());
+    const hostname = currentUrl.hostname.toLowerCase();
+    if (
+      hostname === 'login.microsoftonline.com'
+      || hostname.endsWith('.login.microsoftonline.com')
+      || hostname === 'login.live.com'
+      || currentUrl.pathname.toLowerCase().includes('signin')
+    ) {
+      return false;
+    }
+    const teamsUrl = new URL(this.config.teamsUrl);
+    if (
+      currentUrl.hostname === teamsUrl.hostname
+      && currentUrl.pathname.replace(/\/+$/, '') === teamsUrl.pathname.replace(/\/+$/, '')
+    ) {
+      return false;
+    }
     try {
       const loginEl = await this.page.$(this.config.selectors.loginIndicator);
       if (loginEl) return false;
