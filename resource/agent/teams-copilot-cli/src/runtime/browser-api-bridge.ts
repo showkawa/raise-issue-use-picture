@@ -226,3 +226,15 @@ export async function askWithBrowserApi(
     code: 'BROWSER_API_REQUEST_FAILED',
   });
 }
+
+export async function clearBrowserApiTemplate(page: Page): Promise<void> {
+  await page.evaluate((key) => {
+    const bridge = (window as unknown as Record<string, unknown>)[key] as {
+      url?: string;
+      template?: unknown;
+    } | undefined;
+    if (!bridge) return;
+    delete bridge.url;
+    delete bridge.template;
+  }, BRIDGE_KEY);
+}

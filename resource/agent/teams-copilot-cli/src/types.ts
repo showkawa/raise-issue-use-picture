@@ -9,6 +9,7 @@ export interface CopilotSelectors {
   sendButton: string;
   responseContainer: string;
   loginIndicator: string;
+  fileInput: string;
 }
 
 export interface CopilotTimeouts {
@@ -61,5 +62,6 @@ export interface AskOptions {
 
 export interface CopilotSession {
   ask(prompt: string, options?: AskOptions): Promise<StreamResult>;
+  askWithFile(filePath: string, prompt: string, options?: AskOptions): Promise<StreamResult>;
   close(): Promise<void>;
 }

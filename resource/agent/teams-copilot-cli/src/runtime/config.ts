@@ -18,6 +18,7 @@ const DEFAULTS: AppConfig = {
       sendButton: 'button[type="submit"][aria-label*="Send"], button[type="submit"][aria-label*="发送"], button[aria-label*="Send message"], button[aria-label*="发送消息"]',
       responseContainer: '[data-testid="lastChatMessage"] [data-testid="markdown-reply"], [data-testid="lastChatMessage"], [data-testid="markdown-reply"], [data-content="ai-message"]',
       loginIndicator: 'input[type="email"], input[name="loginfmt"], input[type="password"], input[name="passwd"], [data-tid="sign-in-button"]',
+      fileInput: '#upload-file-button, input[type="file"]',
     },
     timeouts: {
       pageLoad: 30000,

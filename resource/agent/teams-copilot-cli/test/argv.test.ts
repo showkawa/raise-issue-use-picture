@@ -12,6 +12,8 @@ describe('normalizeCliArgv', () => {
   it('preserves explicit commands', () => {
     expect(normalizeCliArgv([...prefix, 'prd', 'demo']))
       .toEqual([...prefix, 'prd', 'demo']);
+    expect(normalizeCliArgv([...prefix, 'review', 'src/index.ts']))
+      .toEqual([...prefix, 'review', 'src/index.ts']);
   });
 
   it('inserts ask after global options', () => {

@@ -64,6 +64,7 @@ tcc ask "你好"
 ```bash
 tcc "用 TypeScript 写一个防抖函数"
 tcc ask "用 TypeScript 写一个防抖函数"
+tcc review .\src\example.ts
 tcc prd demo-chat-app
 tcc arch demo-chat-app
 tcc tasks demo-chat-app
@@ -71,12 +72,21 @@ tcc repl
 ```
 
 - `ask`：直接问答。
+- `review`：将本地代码文件上传到当前 Copilot Chat，并输出 Markdown 审查报告。
 - `prd`：生成 `output/PRD.md`。
 - `arch`：读取 `output/PRD.md` 并生成 `output/ARCH.md`。
 - `tasks`：读取 PRD 和 ARCH，生成 `output/TASKS.md`。
 - `repl`：复用同一个 Copilot 会话进行多轮问答。
 
 使用 `--no-stream` 可关闭逐步输出。
+
+上传代码并将报告同时保存到本地：
+
+```powershell
+tcc --no-stream review .\src\example.ts --output .\review.md
+```
+
+Copilot 页面原生支持的代码扩展名会直接上传；`.ts` 等未列入页面上传白名单的文本代码会以临时的 `.txt` 附件名上传，Prompt 会注明原始文件名，本地文件不会被重命名或修改。空文件和二进制文件会被拒绝。代码内容会发送到 Microsoft 365 Copilot，请只上传账号有权共享的文件。
 
 REPL 内置命令：
 
@@ -107,6 +117,8 @@ npm pack --dry-run
 | `Failed to inject prompt` | 更新 `inputArea` selector，确认输入框可编辑 |
 | `No SignalR assistant response was captured` | 使用默认 `auto` 或临时切到 `copilot.responseMode: "dom"` |
 | `Browser API request failed` | 使用默认 `auto` 自动回退；刷新页面后先执行一次请求以重新捕获模板 |
+| `Microsoft 365 Copilot file upload failed: TooManyRequests` | 等待 Microsoft Graph 限流恢复后重试；减少连续上传次数 |
+| `did not finish attaching` | 检查 Copilot 上传权限、OneDrive 状态、文件类型和网络 |
 | Response truncated | 增加 `timeouts.streaming`，检查网络和 Copilot 状态 |
 
 Microsoft 365 Copilot 页面结构可能随 Microsoft 更新而变化。只在有权限的账号和工作区中使用，并人工审阅生成内容。

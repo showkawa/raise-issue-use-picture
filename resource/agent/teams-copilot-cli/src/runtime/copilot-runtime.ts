@@ -23,6 +23,19 @@ export class CopilotRuntime {
     }
   }
 
+  async askWithFile(
+    filePath: string,
+    prompt: string,
+    options?: AskOptions,
+  ): Promise<StreamResult> {
+    const session = await this.sessionManager.createSession();
+    try {
+      return await session.askWithFile(filePath, prompt, options);
+    } finally {
+      await session.close();
+    }
+  }
+
   async createSession(): Promise<CopilotSession> {
     return this.sessionManager.createSession();
   }

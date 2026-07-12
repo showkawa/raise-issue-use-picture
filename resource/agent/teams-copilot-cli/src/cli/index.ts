@@ -5,13 +5,14 @@ import { prdCommand } from './prd.js';
 import { archCommand } from './arch.js';
 import { tasksCommand } from './tasks.js';
 import { normalizeCliArgv } from './argv.js';
+import { reviewCommand } from './review.js';
 
 const program = new Command();
 
 program
   .name('tcc')
   .description('Microsoft 365 Copilot CLI — AI Coding assistant via browser automation')
-  .version('2.0.0')
+  .version('2.0.1')
   .option('--config <path>', 'Path to config.yaml')
   .option('--browser <path>', 'Browser executable path')
   .option('--port <number>', 'CDP debugging port')
@@ -23,6 +24,15 @@ program
   .action(async (question: string[], opts) => {
     const globalOpts = program.opts();
     await askCommand(question.join(' '), { ...globalOpts, ...opts });
+  });
+
+program
+  .command('review <file>')
+  .description('Upload a local code file and ask Copilot to review it')
+  .option('-o, --output <path>', 'Save the Markdown review to a local file')
+  .action(async (file: string, opts) => {
+    const globalOpts = program.opts();
+    await reviewCommand(file, { ...globalOpts, ...opts });
   });
 
 program

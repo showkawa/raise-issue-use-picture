@@ -10,7 +10,12 @@ import { CopilotPage } from './copilot-page.js';
 import { injectText } from './text-injector.js';
 import { extractStream, readResponseText } from './stream-extractor.js';
 import { createSignalRStream } from './signalr-stream.js';
-import { askWithBrowserApi, installBrowserApiBridge } from './browser-api-bridge.js';
+import {
+  askWithBrowserApi,
+  clearBrowserApiTemplate,
+  installBrowserApiBridge,
+} from './browser-api-bridge.js';
+import { uploadCodeFile } from './code-file-uploader.js';
 import { sanitizeMarkdown } from './markdown-sanitizer.js';
 import type { Browser, Frame, Page } from 'playwright-core';
 
@@ -97,6 +102,31 @@ export class SessionManager {
 
         return { text: sanitizeMarkdown(text), truncated, duration };
       },
+      askWithFile: async (
+        filePath: string,
+        prompt: string,
+        options: AskOptions = {},
+      ): Promise<StreamResult> => {
+        const page = this.page ?? frame.page();
+        const uploaded = await uploadCodeFile(
+          page,
+          filePath,
+          this.config.copilot.timeouts.streaming,
+          this.config.copilot.selectors.fileInput,
+        );
+        const reviewPrompt = uploaded.aliased
+          ? `${prompt}\n\n附件 "${uploaded.uploadName}" 的原始文件名是 "${uploaded.originalName}"。`
+          : prompt;
+        try {
+          const result = await this.askInFrame(frame, reviewPrompt, options, true);
+          return {
+            ...result,
+            text: sanitizeMarkdown(result.text),
+          };
+        } finally {
+          await clearBrowserApiTemplate(page);
+        }
+      },
       close: async (): Promise<void> => {
         // Session close doesn't close the browser
       },
@@ -121,8 +151,9 @@ export class SessionManager {
     frame: Frame,
     prompt: string,
     options: AskOptions,
+    forceDom = false,
   ): Promise<StreamResult> {
-    if (this.config.copilot.requestMode !== 'dom') {
+    if (!forceDom && this.config.copilot.requestMode !== 'dom') {
       try {
         const browserApiResult = await askWithBrowserApi(
           this.page ?? frame.page(),

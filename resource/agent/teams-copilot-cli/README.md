@@ -57,6 +57,7 @@ The authenticated WebSocket URL and request template remain in page memory. The 
 ```bash
 tcc "Question"
 tcc ask "Question"
+tcc review ./src/example.ts
 tcc prd "Project Name"
 tcc arch "Project Name"
 tcc tasks "Project Name"
@@ -66,6 +67,19 @@ tcc repl
 `prd`, `arch`, and `tasks` write Markdown files to `output/`. `arch` requires `output/PRD.md`; `tasks` requires both `output/PRD.md` and `output/ARCH.md`.
 
 Use `--no-stream` to wait for the full response before printing.
+
+### Review a local code file
+
+```bash
+tcc review ./src/example.ts
+tcc --no-stream review ./src/example.ts --output ./review.md
+```
+
+`review` uploads the file through the existing authenticated Copilot Chat page, asks Copilot for a Markdown code review, and prints the response. `--output` also saves the final report locally.
+
+The CLI uses Copilot's native file attachment flow. Extensions accepted by the page are uploaded directly. Other text code files, including `.ts`, are uploaded with a temporary `.txt` attachment name while preserving and identifying the original filename in the review prompt; the local source file is not renamed or modified. Binary files and empty files are rejected.
+
+Uploaded code is sent to Microsoft 365 Copilot and may be stored in the account's Copilot upload area. Review only files that the account is authorized to share.
 
 ## Disclaimer
 
