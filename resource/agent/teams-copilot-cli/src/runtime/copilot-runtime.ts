@@ -1,13 +1,19 @@
-import type { AppConfig, AskOptions, CopilotSession, StreamResult } from '../types.js';
+import type {
+  AppConfig,
+  AskOptions,
+  BrowserConfig,
+  CopilotSession,
+  RuntimeStatusHandler,
+  StreamResult,
+} from '../types.js';
 import { SessionManager } from './session-manager.js';
 import { loadConfig, mergeCliFlags } from './config.js';
-import type { BrowserConfig } from '../types.js';
 
 export class CopilotRuntime {
   private sessionManager: SessionManager;
 
-  constructor(config?: AppConfig) {
-    this.sessionManager = new SessionManager(config);
+  constructor(config?: AppConfig, onStatus?: RuntimeStatusHandler) {
+    this.sessionManager = new SessionManager(config, onStatus);
   }
 
   async init(): Promise<void> {
@@ -48,12 +54,13 @@ export class CopilotRuntime {
 export async function createRuntime(
   configPath?: string,
   browserFlags?: Partial<BrowserConfig>,
+  onStatus?: RuntimeStatusHandler,
 ): Promise<CopilotRuntime> {
   let config = loadConfig(configPath);
   if (browserFlags) {
     config = mergeCliFlags(config, browserFlags);
   }
-  const runtime = new CopilotRuntime(config);
+  const runtime = new CopilotRuntime(config, onStatus);
   try {
     await runtime.init();
     return runtime;

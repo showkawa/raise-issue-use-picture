@@ -70,6 +70,12 @@ tcc repl
 
 Use `--no-stream` to wait for the full response before printing.
 
+Status messages are written to stderr while the CLI connects to the browser,
+opens Copilot, submits the prompt, and waits for a response. Long waits print
+an elapsed-time heartbeat every 15 seconds and include the configured timeout,
+so a stalled browser or Copilot request is visible without mixing diagnostics
+into the response on stdout.
+
 ### Ask about code as inline text
 
 Enter a multiline prompt directly in either CMD or Git Bash. Run `tcc @`,

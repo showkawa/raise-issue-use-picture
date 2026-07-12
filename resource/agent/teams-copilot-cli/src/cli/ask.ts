@@ -11,6 +11,10 @@ import {
 
 const INLINE_PROMPT_WARNING_LENGTH = 8000;
 
+function reportStatus(message: string): void {
+  process.stderr.write(`[tcc] ${message}\n`);
+}
+
 export interface CommandOpts {
   config?: string;
   browser?: string;
@@ -56,7 +60,11 @@ export async function askCommand(question: string, opts: AskCommandOpts): Promis
     );
   }
 
-  const runtime = await createRuntime(opts.config, browserFlagsFromOptions(opts));
+  const runtime = await createRuntime(
+    opts.config,
+    browserFlagsFromOptions(opts),
+    reportStatus,
+  );
   const stream = opts.stream !== false;
   try {
     const result = await runtime.ask(prompt, {
