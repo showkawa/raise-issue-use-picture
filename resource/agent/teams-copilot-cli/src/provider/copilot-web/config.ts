@@ -1,10 +1,29 @@
-import type { AppConfig, BrowserConfig } from '../types.js';
+import type { AgentConfig, AppConfig, BrowserConfig } from '../../types.js';
 import { readFileSync, existsSync } from 'fs';
 import { load as yamlLoad } from 'js-yaml';
 import { join } from 'path';
 import { homedir } from 'os';
 
+const AGENT_DEFAULTS: AgentConfig = {
+  permissionMode: 'yolo',
+  maxIterations: 25,
+  maxContinuations: 4,
+  maxTurnsPerConversation: 30,
+  minSendIntervalMs: 1500,
+  maxMessageChars: 8000,
+  denyCommands: [
+    'rm -rf',
+    'Remove-Item -Recurse',
+    'git push',
+    'git reset --hard',
+    'npm publish',
+  ],
+  allowCommands: [],
+};
+
 const DEFAULTS: AppConfig = {
+  provider: 'copilot-web',
+  agent: AGENT_DEFAULTS,
   browser: {
     port: 9222,
     userDataDir: join(homedir(), '.teams-copilot', 'profile'),
@@ -70,6 +89,31 @@ function validate(config: AppConfig): void {
       throw new Error(`Invalid field: copilot.timeouts.${name}`);
     }
   }
+  if (config.provider !== 'copilot-web' && config.provider !== 'mock') {
+    throw new Error('Invalid field: provider');
+  }
+  const { agent } = config;
+  if (
+    agent.permissionMode !== 'yolo'
+    && agent.permissionMode !== 'allowlist'
+    && agent.permissionMode !== 'ask'
+  ) {
+    throw new Error('Invalid field: agent.permissionMode');
+  }
+  for (const name of [
+    'maxIterations',
+    'maxContinuations',
+    'maxTurnsPerConversation',
+    'minSendIntervalMs',
+    'maxMessageChars',
+  ] as const) {
+    if (!Number.isFinite(agent[name]) || agent[name] < 0) {
+      throw new Error(`Invalid field: agent.${name}`);
+    }
+  }
+  if (!Array.isArray(agent.denyCommands) || !Array.isArray(agent.allowCommands)) {
+    throw new Error('Invalid field: agent.denyCommands');
+  }
 }
 
 export function loadConfig(configPath?: string): AppConfig {
@@ -83,6 +127,7 @@ export function loadConfig(configPath?: string): AppConfig {
         selectors: { ...DEFAULTS.copilot.selectors },
         timeouts: { ...DEFAULTS.copilot.timeouts },
       },
+      agent: { ...AGENT_DEFAULTS, denyCommands: [...AGENT_DEFAULTS.denyCommands], allowCommands: [...AGENT_DEFAULTS.allowCommands] },
     };
   }
   try {
@@ -121,6 +166,13 @@ export function loadConfig(configPath?: string): AppConfig {
         }
       : {};
     const config: AppConfig = {
+      provider: raw?.provider ?? DEFAULTS.provider,
+      agent: {
+        ...AGENT_DEFAULTS,
+        ...(raw as Partial<AppConfig>)?.agent,
+        denyCommands: (raw as Partial<AppConfig>)?.agent?.denyCommands ?? [...AGENT_DEFAULTS.denyCommands],
+        allowCommands: (raw as Partial<AppConfig>)?.agent?.allowCommands ?? [...AGENT_DEFAULTS.allowCommands],
+      },
       browser: { ...DEFAULTS.browser, ...legacyBrowser, ...raw?.browser },
       copilot: {
         ...DEFAULTS.copilot,

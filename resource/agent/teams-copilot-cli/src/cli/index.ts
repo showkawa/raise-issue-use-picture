@@ -68,6 +68,35 @@ program
   });
 
 program
+  .command('code <task...>')
+  .description('Run the coding agent on a task in the current repo; use @file to attach file contents')
+  .option('--permission-mode <mode>', 'yolo | allowlist | ask')
+  .option('--max-iterations <n>', 'Max agent iterations')
+  .action(async (task: string[], opts) => {
+    const globalOpts = program.opts();
+    const { codeCommand } = await import('./code.js');
+    const prompt = task.length === 1 && task[0] === '@'
+      ? await readDelimitedQuestion()
+      : task.join(' ');
+    await codeCommand(prompt, { ...globalOpts, ...opts });
+  });
+
+program
+  .command('implement')
+  .description('Execute pending checkbox tasks from a TASKS.md via the coding agent')
+  .option('--tasks <path>', 'Tasks file path (default: output/TASKS.md)')
+  .option('--task <id>', 'Run only the task with this id (e.g. T2)')
+  .option('--continue-on-failure', 'Continue with the next task when one fails')
+  .option('--commit', 'Auto git-commit changed files after each successful task (requires a clean worktree)')
+  .option('--permission-mode <mode>', 'yolo | allowlist | ask')
+  .option('--max-iterations <n>', 'Max agent iterations per task')
+  .action(async (opts) => {
+    const globalOpts = program.opts();
+    const { implementCommand } = await import('./implement.js');
+    await implementCommand({ ...globalOpts, ...opts });
+  });
+
+program
   .command('repl')
   .description('Interactive REPL chat with Copilot')
   .action(async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { injectText } from '../src/runtime/text-injector.js';
+import { injectText } from '../src/provider/copilot-web/text-injector.js';
 
 function createFrame(evaluateResults: unknown[], insertTextError?: Error) {
   const keyboard = {

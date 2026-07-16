@@ -1,4 +1,21 @@
 # Copy to config.yaml when you need to override defaults.
+provider: "copilot-web"   # copilot-web | mock
+
+agent:
+  permissionMode: "yolo"  # yolo | allowlist | ask
+  maxIterations: 25
+  maxContinuations: 4
+  maxTurnsPerConversation: 30
+  minSendIntervalMs: 1500
+  maxMessageChars: 8000
+  denyCommands:
+    - "rm -rf"
+    - "Remove-Item -Recurse"
+    - "git push"
+    - "git reset --hard"
+    - "npm publish"
+  allowCommands: []
+
 browser:
   # Optional. If omitted, the CLI prefers Chrome, then scans Edge/Chromium.
   # path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"

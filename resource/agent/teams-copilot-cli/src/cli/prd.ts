@@ -1,6 +1,6 @@
 import { writeFileSync } from 'fs';
 import { join } from 'path';
-import { createRuntime } from '../runtime/copilot-runtime.js';
+import { createRuntime } from '../provider/copilot-web/copilot-runtime.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions, ensureOutputDir, readPromptTemplate } from './utils.js';
 

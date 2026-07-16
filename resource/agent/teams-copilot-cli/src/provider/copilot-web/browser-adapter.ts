@@ -1,4 +1,4 @@
-import type { BrowserConfig } from '../types.js';
+import type { BrowserConfig } from '../../types.js';
 import { spawn, type ChildProcess } from 'child_process';
 import { chromium, type Browser } from 'playwright-core';
 import http from 'http';

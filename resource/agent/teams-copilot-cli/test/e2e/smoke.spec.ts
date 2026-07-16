@@ -4,9 +4,9 @@ import {
   connectToBrowser,
   closeBrowser,
   terminateBrowserProcess,
-} from '../../dist/runtime/browser-adapter.js';
-import { findChromiumBrowser } from '../../dist/runtime/browser-finder.js';
-import { loadConfig } from '../../dist/runtime/config.js';
+} from '../../dist/provider/copilot-web/browser-adapter.js';
+import { findChromiumBrowser } from '../../dist/provider/copilot-web/browser-finder.js';
+import { loadConfig } from '../../dist/provider/copilot-web/config.js';
 import { accessSync, constants } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';

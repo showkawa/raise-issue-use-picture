@@ -1,4 +1,4 @@
-import { createRuntime } from '../runtime/copilot-runtime.js';
+import { createRuntime } from '../provider/copilot-web/copilot-runtime.js';
 import { browserFlagsFromOptions } from './utils.js';
 import { resolve } from 'path';
 import {

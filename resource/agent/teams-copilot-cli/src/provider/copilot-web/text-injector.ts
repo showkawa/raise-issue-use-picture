@@ -1,4 +1,4 @@
-import type { InjectResult } from '../types.js';
+import type { InjectResult } from '../../types.js';
 import type { Frame } from 'playwright-core';
 
 export async function injectText(

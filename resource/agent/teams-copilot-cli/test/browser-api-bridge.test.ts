@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { askWithBrowserApi } from '../src/runtime/browser-api-bridge.js';
+import { askWithBrowserApi } from '../src/provider/copilot-web/browser-api-bridge.js';
 
 describe('askWithBrowserApi', () => {
   it('returns null when the page has no captured request template', async () => {

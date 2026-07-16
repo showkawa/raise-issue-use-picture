@@ -30,9 +30,26 @@ export interface CopilotConfig {
   timeouts: CopilotTimeouts;
 }
 
+export type PermissionMode = 'yolo' | 'allowlist' | 'ask';
+
+export interface AgentConfig {
+  permissionMode: PermissionMode;
+  maxIterations: number;
+  maxContinuations: number;
+  maxTurnsPerConversation: number;
+  minSendIntervalMs: number;
+  maxMessageChars: number;
+  denyCommands: string[];
+  allowCommands: string[];
+}
+
+export type ProviderId = 'copilot-web' | 'mock';
+
 export interface AppConfig {
   browser: BrowserConfig;
   copilot: CopilotConfig;
+  provider: ProviderId;
+  agent: AgentConfig;
 }
 
 export interface InjectResult {

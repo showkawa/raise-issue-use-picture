@@ -1,5 +1,5 @@
 import * as readline from 'readline';
-import { createRuntime } from '../runtime/copilot-runtime.js';
+import { createRuntime } from '../provider/copilot-web/copilot-runtime.js';
 import type { CopilotSession } from '../types.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';

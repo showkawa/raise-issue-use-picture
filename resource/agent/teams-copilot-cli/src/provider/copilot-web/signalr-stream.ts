@@ -1,4 +1,4 @@
-import type { CopilotConfig, StreamResult } from '../types.js';
+import type { CopilotConfig, StreamResult } from '../../types.js';
 import type { Page } from 'playwright-core';
 
 const SIGNALR_SEPARATOR = String.fromCharCode(0x1e);

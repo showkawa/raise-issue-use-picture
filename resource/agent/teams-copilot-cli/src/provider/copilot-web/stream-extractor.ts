@@ -1,4 +1,4 @@
-import type { StreamResult, CopilotConfig } from '../types.js';
+import type { StreamResult, CopilotConfig } from '../../types.js';
 import type { Frame } from 'playwright-core';
 
 export interface ExtractOptions {
@@ -49,21 +49,44 @@ export async function readResponseText(
   selector: string,
   baseline = '',
 ): Promise<string> {
-  const text = await frame.evaluate(
+  const raw = await frame.evaluate(
     (sel) => {
       const containers = Array.from(document.querySelectorAll(sel));
       const texts = containers
-        .map((container) => (container.textContent || '').trim())
+        .map((container) => (container instanceof HTMLElement
+          ? container.innerText
+          : container.textContent || '').trim())
         .filter(Boolean);
       return texts.length > 0 ? texts[texts.length - 1] : '';
     },
     selector,
   );
 
+  const text = cleanCapturedText(raw);
   if (baseline && text.startsWith(baseline)) {
     return text.slice(baseline.length).trimStart();
   }
   return text;
+}
+
+/**
+ * Normalizes text captured from the Copilot page: the code-block widget
+ * HTML-escapes angle brackets and injects a language header plus a
+ * line-number gutter into the rendered text.
+ */
+export function cleanCapturedText(text: string): string {
+  const decoded = text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;|\u00a0/g, ' ')
+    .replace(/&amp;/g, '&');
+  return decoded
+    .split('\n')
+    .filter((line) => !/^\s*\d+\s*$/.test(line)
+      && !/^\s*(plain text|plaintext|markdown|json|yaml|text)\s*$/i.test(line))
+    .join('\n');
 }
 
 export function isTruncated(text: string): boolean {
