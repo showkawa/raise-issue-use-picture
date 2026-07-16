@@ -5,7 +5,7 @@ import type {
   CopilotSession,
   RuntimeStatusHandler,
   StreamResult,
-} from '../types.js';
+} from '../../types.js';
 import { SessionManager } from './session-manager.js';
 import { loadConfig, mergeCliFlags } from './config.js';
 

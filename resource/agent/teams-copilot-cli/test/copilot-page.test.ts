@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CopilotPage } from '../src/runtime/copilot-page.js';
+import { CopilotPage } from '../src/provider/copilot-web/copilot-page.js';
 import type { CopilotConfig } from '../src/types.js';
 
 const config: CopilotConfig = {

@@ -1,4 +1,4 @@
-import type { StreamResult } from '../types.js';
+import type { StreamResult } from '../../types.js';
 import type { Page } from 'playwright-core';
 
 const BRIDGE_KEY = '__m365CopilotCliBridgeV1';

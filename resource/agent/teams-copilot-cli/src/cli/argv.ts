@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['ask', 'review', 'prd', 'arch', 'tasks', 'repl', 'help']);
+const COMMANDS = new Set(['ask', 'review', 'prd', 'arch', 'tasks', 'code', 'implement', 'repl', 'help']);
 const OPTIONS_WITH_VALUE = new Set(['--config', '--browser', '--port']);
 const HELP_OPTIONS = new Set(['--help', '-h', '--version', '-V']);
 

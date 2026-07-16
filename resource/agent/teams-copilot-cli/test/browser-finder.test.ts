@@ -6,7 +6,7 @@ vi.mock('fs', () => ({
 }));
 
 import { accessSync } from 'fs';
-import { findChromiumBrowser } from '../src/runtime/browser-finder.js';
+import { findChromiumBrowser } from '../src/provider/copilot-web/browser-finder.js';
 
 describe('findChromiumBrowser', () => {
   const originalPlatform = process.platform;

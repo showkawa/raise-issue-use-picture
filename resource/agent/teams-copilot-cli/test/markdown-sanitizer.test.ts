@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeMarkdown } from '../src/runtime/markdown-sanitizer.js';
+import { sanitizeMarkdown } from '../src/provider/copilot-web/markdown-sanitizer.js';
 
 describe('sanitizeMarkdown', () => {
   it('removes a standalone greeting and follow-up line', () => {

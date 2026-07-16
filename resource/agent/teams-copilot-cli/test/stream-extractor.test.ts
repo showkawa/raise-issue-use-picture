@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { isTruncated, readResponseText } from '../src/runtime/stream-extractor.js';
+import { isTruncated, readResponseText } from '../src/provider/copilot-web/stream-extractor.js';
 
 describe('isTruncated', () => {
   it('detects unclosed markdown fences', () => {

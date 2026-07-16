@@ -1,4 +1,4 @@
-import type { CopilotConfig } from '../types.js';
+import type { CopilotConfig } from '../../types.js';
 import type { Page, Frame } from 'playwright-core';
 
 export class CopilotPage {

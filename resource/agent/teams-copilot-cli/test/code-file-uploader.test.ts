@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { prepareCodeUpload } from '../src/runtime/code-file-uploader.js';
+import { prepareCodeUpload } from '../src/provider/copilot-web/code-file-uploader.js';
 
 const directories: string[] = [];
 

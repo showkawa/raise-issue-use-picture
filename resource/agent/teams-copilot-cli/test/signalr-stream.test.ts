@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { describe, expect, it, vi } from 'vitest';
-import { createSignalRStream } from '../src/runtime/signalr-stream.js';
+import { createSignalRStream } from '../src/provider/copilot-web/signalr-stream.js';
 import type { CopilotConfig } from '../src/types.js';
 
 const config: CopilotConfig = {

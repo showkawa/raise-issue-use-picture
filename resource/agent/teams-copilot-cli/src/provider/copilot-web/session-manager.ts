@@ -4,7 +4,7 @@ import type {
   CopilotSession,
   RuntimeStatusHandler,
   StreamResult,
-} from '../types.js';
+} from '../../types.js';
 import { loadConfig } from './config.js';
 import {
   launchBrowser,
@@ -23,6 +23,7 @@ import {
 } from './browser-api-bridge.js';
 import { uploadCodeFile } from './code-file-uploader.js';
 import { sanitizeMarkdown } from './markdown-sanitizer.js';
+import { mergeContinuation } from './continuation.js';
 import type { Browser, Frame, Page } from 'playwright-core';
 
 const ERROR_CODES = {
@@ -141,7 +142,7 @@ export class SessionManager {
             '请严格从你断开的地方继续输出，不要重复已输出内容。',
             options,
           );
-          text = `${text}\n${continuation.text}`.trim();
+          text = mergeContinuation(text, continuation.text);
           truncated = continuation.truncated;
           duration += continuation.duration;
         }
@@ -177,6 +178,15 @@ export class SessionManager {
         // Session close doesn't close the browser
       },
     };
+  }
+
+  async isHealthy(): Promise<boolean> {
+    if (!this.page || this.page.isClosed() || !this.copilotPage) return false;
+    try {
+      return await this.copilotPage.isLoggedIn();
+    } catch {
+      return false;
+    }
   }
 
   async close(): Promise<void> {
@@ -295,11 +305,45 @@ export class SessionManager {
   private async sendPrompt(frame: Frame): Promise<void> {
     try {
       await frame.locator(this.config.copilot.selectors.sendButton).first().click({ timeout: 5000 });
-      return;
     } catch {
       await frame.locator(this.config.copilot.selectors.inputArea).first().click({ timeout: 5000 });
       await frame.page().keyboard.press('Enter');
     }
+    if (await this.waitForInputCleared(frame, 3000)) return;
+
+    let clicked = false;
+    try {
+      await frame
+        .locator('button[class*="fai-SendButton"], button[type="submit"][class*="SendButton"]')
+        .first()
+        .click({ timeout: 5000 });
+      clicked = true;
+    } catch {
+      clicked = false;
+    }
+    if (!clicked || !(await this.waitForInputCleared(frame, 5000))) {
+      throw Object.assign(new Error('The prompt stayed in the editor; the send button was not triggered.'), {
+        code: 'PROMPT_SEND_FAILED',
+      });
+    }
+  }
+
+  private async waitForInputCleared(frame: Frame, timeout: number): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    const selector = this.config.copilot.selectors.inputArea;
+    while (Date.now() <= deadline) {
+      try {
+        const remaining = await frame.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          return (el?.textContent ?? '').trim().length;
+        }, selector);
+        if (remaining === 0) return true;
+      } catch {
+        // The frame can be mid-navigation right after submit.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return false;
   }
 
   private report(message: string): void {

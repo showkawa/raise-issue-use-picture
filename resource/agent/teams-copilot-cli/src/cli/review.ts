@@ -1,5 +1,5 @@
 import { resolve } from 'path';
-import { createRuntime } from '../runtime/copilot-runtime.js';
+import { createRuntime } from '../provider/copilot-web/copilot-runtime.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
 import { writeTextOutput } from './prompt-content.js';
