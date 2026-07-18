@@ -13,6 +13,12 @@ from .session_store import PersistentSession, PersistentSessionStore
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
+from .tool_protocol import (
+    ToolParseOutcome,
+    correction_prompt,
+    parse_model_output,
+    tool_names,
+)
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
 
 _PERSIST_MODEL_SUFFIX = ":persist"
@@ -23,13 +29,17 @@ def create_app(
     settings: Settings | None = None,
     copilot_client_factory: Callable[[], SubstrateCopilotClient] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Microsoft 365 Copilot OpenAI Proxy")
+    app = FastAPI(title="Teams Copilot Proxy")
     resolved_settings = settings or Settings()
     app.state.settings = resolved_settings
     app.state.token_store = AccessTokenStore(resolved_settings.access_token)
     app.state.session_store = PersistentSessionStore()
     app.state.copilot_client_factory = copilot_client_factory or (
-        lambda: SubstrateCopilotClient(app.state.token_store.get(), resolved_settings.time_zone)
+        lambda: SubstrateCopilotClient(
+            app.state.token_store.get(),
+            resolved_settings.time_zone,
+            resolved_settings.proxy,
+        )
     )
 
     def get_settings() -> Settings:
@@ -67,9 +77,21 @@ def create_app(
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
         try:
-            translated = translate_openai_request(request)
+            translated = translate_openai_request(request, settings.max_transcript_chars)
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:
+                if request.tools:
+                    return StreamingResponse(
+                        _openai_stream_with_tools(
+                            settings.model_alias,
+                            client,
+                            translated.prompt,
+                            translated.additional_context,
+                            request.tools,
+                            session,
+                        ),
+                        media_type="text/event-stream",
+                    )
                 return StreamingResponse(
                     _openai_stream(
                         settings.model_alias,
@@ -80,6 +102,15 @@ def create_app(
                     ),
                     media_type="text/event-stream",
                 )
+            if request.tools:
+                outcome = await _chat_resolving_tools(
+                    client,
+                    translated.prompt,
+                    translated.additional_context,
+                    request.tools,
+                    session,
+                )
+                return JSONResponse(_tool_outcome_completion(settings.model_alias, outcome))
             text = await client.chat(translated.prompt, translated.additional_context, session)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -189,6 +220,106 @@ def _persistent_session(
     if model.endswith(_PERSIST_MODEL_SUFFIX):
         return app.state.session_store.get(f"model:{fallback_key or 'default'}")
     return None
+
+
+async def _chat_resolving_tools(
+    client: SubstrateCopilotClient,
+    prompt: str,
+    additional_context: list[str],
+    tools: list[dict],
+    session: PersistentSession | None = None,
+) -> ToolParseOutcome:
+    allowed = tool_names(tools)
+    text = await client.chat(prompt, additional_context, session)
+    outcome = parse_model_output(text, allowed)
+    if outcome.error is None:
+        return outcome
+    retry_context = additional_context + [
+        f"Original request:\n{prompt}",
+        f"Your previous reply:\n{text}",
+    ]
+    retry_text = await client.chat(correction_prompt(outcome.error), retry_context, session)
+    retry_outcome = parse_model_output(retry_text, allowed)
+    if retry_outcome.error is None:
+        return retry_outcome
+    return ToolParseOutcome(text=outcome.text)
+
+
+def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dict:
+    if outcome.tool_call is not None:
+        message = {
+            "role": "assistant",
+            "content": outcome.text or None,
+            "tool_calls": [outcome.tool_call.as_openai()],
+        }
+        finish_reason = "tool_calls"
+    else:
+        message = {"role": "assistant", "content": outcome.text}
+        finish_reason = "stop"
+    return {
+        "id": f"chatcmpl_{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_alias,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+
+
+async def _openai_stream_with_tools(
+    model_alias: str,
+    client: SubstrateCopilotClient,
+    prompt: str,
+    additional_context: list[str],
+    tools: list[dict],
+    session: PersistentSession | None = None,
+) -> AsyncIterator[str]:
+    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    def chunk(delta: dict, finish_reason: str | None = None) -> str:
+        payload = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model_alias,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(payload)}\n\n"
+
+    yield chunk({"role": "assistant"})
+    try:
+        outcome = await _chat_resolving_tools(client, prompt, additional_context, tools, session)
+    except SubstrateCopilotError as exc:
+        yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    if outcome.tool_call is not None:
+        call = outcome.tool_call.as_openai()
+        if outcome.text:
+            yield chunk({"content": outcome.text})
+        yield chunk({
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": call["id"],
+                    "type": "function",
+                    "function": call["function"],
+                }
+            ]
+        })
+        yield chunk({}, "tool_calls")
+    else:
+        if outcome.text:
+            yield chunk({"content": outcome.text})
+        yield chunk({}, "stop")
+    yield "data: [DONE]\n\n"
 
 
 async def _openai_stream(

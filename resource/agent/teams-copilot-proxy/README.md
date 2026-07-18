@@ -1,4 +1,4 @@
-# Microsoft 365 Copilot OpenAI Proxy
+# Teams Copilot Proxy
 
 Use Microsoft 365 Copilot through OpenAI-compatible clients, local scripts, and coding tools.
 
@@ -14,12 +14,13 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Auto-captures and refreshes the short-lived browser token
 - Supports persistent Copilot sessions across turns
 - Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages style requests
+- Emulated tool calling on `/v1/chat/completions`, so agentic clients like OpenCode can read files, run commands, and edit code
 
 ## Quick Start
 
 ```bat
 uv sync
-uv run copilot-openai-proxy serve
+uv run teams-copilot-proxy serve
 ```
 
 The server starts at:
@@ -33,7 +34,7 @@ On first run, the proxy opens a dedicated Edge window. Sign in to M365 Copilot t
 The dedicated Edge profile is stored at:
 
 ```text
-%USERPROFILE%\.m365-copilot-openai-proxy\edge-profile
+%USERPROFILE%\.teams-copilot-proxy\edge-profile
 ```
 
 If startup says it is waiting for a token, click the Copilot message box and type one character. You do not need to send the message.
@@ -77,6 +78,12 @@ For persistent Copilot-side conversation memory:
 m365-copilot:persist
 ```
 
+Tool calling: when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked once, then degrade to plain text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
+
+### Codex CLI
+
+Codex CLI defaults to the Responses API, which does not support tools on this proxy yet. Point it at the Chat Completions endpoint instead by setting `wire_api = "chat"` in its provider config, with base URL `http://127.0.0.1:8000/v1` and any API key.
+
 ### Continue
 
 Add this to `%USERPROFILE%\.continue\config.json`:
@@ -103,7 +110,7 @@ set ANTHROPIC_API_KEY=dummy
 claude
 ```
 
-Claude Code note: this proxy does not implement tool use. It can answer general prompts, but agentic features such as file reading, bash, and code editing still require the real Anthropic API.
+Claude Code note: the Anthropic-style `/v1/messages` endpoint does not implement tool use yet. It can answer general prompts, but agentic features such as file reading, bash, and code editing still require the real Anthropic API. (Tool calling is currently only emulated on `/v1/chat/completions`.)
 
 ## Persistent Sessions
 
@@ -132,16 +139,16 @@ M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes 
 Auto-refresh is on by default:
 
 ```bat
-uv run copilot-openai-proxy serve
+uv run teams-copilot-proxy serve
 ```
 
 Useful controls:
 
 ```bat
-uv run copilot-openai-proxy serve --refresh-before-seconds 300
-uv run copilot-openai-proxy serve --no-auto-refresh
-uv run copilot-openai-proxy serve --no-capture-on-start
-uv run copilot-openai-proxy serve --no-launch-edge
+uv run teams-copilot-proxy serve --refresh-before-seconds 300
+uv run teams-copilot-proxy serve --no-auto-refresh
+uv run teams-copilot-proxy serve --no-capture-on-start
+uv run teams-copilot-proxy serve --no-launch-edge
 ```
 
 You can also press `r` in the server console to refresh the token manually.
@@ -149,7 +156,7 @@ You can also press `r` in the server console to refresh the token manually.
 ### Manual Fallback
 
 ```bat
-uv run copilot-openai-proxy set-token
+uv run teams-copilot-proxy set-token
 ```
 
 Then paste a fresh Substrate WebSocket URL:
@@ -238,12 +245,14 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_ACCESS_TOKEN` | optional at startup | Browser WebSocket token. If missing, startup capture can fill `.env`. |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Optional. Time zone sent to Copilot. Usually no need to set this if `Asia/Tokyo` is correct. |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Optional. Model name returned by `/v1/models`. Usually no need to change this. |
+| `M365_MAX_TRANSCRIPT_CHARS` | `200000` | Optional. Character budget for the flattened prior-conversation transcript; oldest lines are dropped first. |
+| `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Edge profile.
-- Tool calls are not supported.
+- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` and `/v1/messages` do not support tools yet.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
 

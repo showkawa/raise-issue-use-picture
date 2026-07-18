@@ -5,7 +5,7 @@ The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admi
 ## Current manual flow
 
 ```bat
-uv run copilot-openai-proxy set-token
+uv run teams-copilot-proxy set-token
 REM paste full WebSocket URL from DevTools -> Network -> substrate WebSocket -> Headers
 ```
 
@@ -53,14 +53,14 @@ Launch a dedicated Edge profile with the remote debugging flag, then connect to 
 
 **Start the server:**
 ```bat
-uv run copilot-openai-proxy serve
+uv run teams-copilot-proxy serve
 ```
 
 `serve` opens the dedicated debug Edge window by default. Sign in to M365 Copilot in that window once.
 The profile is stored under
-`%USERPROFILE%\.m365-copilot-openai-proxy\edge-profile`, so later launches can reuse the sign-in.
+`%USERPROFILE%\.teams-copilot-proxy\edge-profile`, so later launches can reuse the sign-in.
 Then the server connects to `http://localhost:9222` and extracts the token from the Copilot tab.
-`uv run copilot-openai-proxy serve` starts an auto-refresh loop by default. It refreshes when the
+`uv run teams-copilot-proxy serve` starts an auto-refresh loop by default. It refreshes when the
 current JWT has less than 5 minutes left.
 If the current token is missing, expired, or not a Substrate token, `serve` first tries the same `r`-style
 refresh from the current debug Edge tab. If no Substrate token is available yet, it starts a one-shot
@@ -69,10 +69,10 @@ the message box, and typing one character. The message does not need to be sent.
 
 Useful serve flags:
 ```bat
-uv run copilot-openai-proxy serve --refresh-before-seconds 300
-uv run copilot-openai-proxy serve --no-launch-edge
-uv run copilot-openai-proxy serve --no-capture-on-start
-uv run copilot-openai-proxy serve --no-auto-refresh
+uv run teams-copilot-proxy serve --refresh-before-seconds 300
+uv run teams-copilot-proxy serve --no-launch-edge
+uv run teams-copilot-proxy serve --no-capture-on-start
+uv run teams-copilot-proxy serve --no-auto-refresh
 ```
 
 **Pros:** lightweight, uses `websockets` (already installed), works even if normal Edge is already open  

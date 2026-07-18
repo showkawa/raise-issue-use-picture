@@ -14,3 +14,5 @@ class Settings(BaseSettings):
     access_token: str = Field(default="", alias="M365_ACCESS_TOKEN")
     time_zone: str = Field(default="Asia/Tokyo", alias="M365_TIME_ZONE")
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")
+    max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
+    proxy: str = Field(default="", alias="M365_PROXY")

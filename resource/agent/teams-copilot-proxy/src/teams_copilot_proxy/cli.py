@@ -70,7 +70,7 @@ _CDP_NUDGE_JS = """
 
 async def _cdp_extract_token(port: int, *, allow_nudge: bool = True) -> str | None:
     try:
-        async with httpx.AsyncClient(timeout=1) as client:
+        async with httpx.AsyncClient(timeout=1, trust_env=False) as client:
             tabs = (await client.get(f"http://localhost:{port}/json")).json()
     except Exception:
         return None
@@ -98,7 +98,7 @@ async def _cdp_capture_websocket_token(port: int, timeout_seconds: int) -> str |
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
+            async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
                 tabs = (await client.get(f"http://localhost:{port}/json")).json()
         except Exception:
             await asyncio.sleep(1)
@@ -157,7 +157,7 @@ def _wait_for_m365_page(cdp_port: int, timeout_seconds: int) -> bool:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         try:
-            with httpx.Client(timeout=1) as client:
+            with httpx.Client(timeout=1, trust_env=False) as client:
                 tabs = client.get(f"http://localhost:{cdp_port}/json").json()
         except Exception:
             time.sleep(0.5)
@@ -321,7 +321,7 @@ def _write_token(token: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="copilot-openai-proxy")
+    parser = argparse.ArgumentParser(prog="teams-copilot-proxy")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("set-token").set_defaults(func=set_token_command)
@@ -355,7 +355,7 @@ def launch_edge_command(args: argparse.Namespace) -> None:
 
 
 def _launch_debug_edge(cdp_port: int) -> None:
-    profile_dir = Path.home() / ".m365-copilot-openai-proxy" / "edge-profile"
+    profile_dir = Path.home() / ".teams-copilot-proxy" / "edge-profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     subprocess.Popen([
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",

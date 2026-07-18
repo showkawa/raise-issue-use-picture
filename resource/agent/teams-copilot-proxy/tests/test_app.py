@@ -7,8 +7,8 @@ from collections.abc import AsyncIterator
 
 from fastapi.testclient import TestClient
 
-from m365_copilot_openai_proxy.app import create_app
-from m365_copilot_openai_proxy.cli import (
+from teams_copilot_proxy.app import create_app
+from teams_copilot_proxy.cli import (
     _find_m365_page,
     _is_substrate_token,
     _needs_substrate_token,
@@ -16,9 +16,9 @@ from m365_copilot_openai_proxy.cli import (
     _seconds_remaining,
     _write_token,
 )
-from m365_copilot_openai_proxy.config import Settings
-from m365_copilot_openai_proxy.session_store import PersistentSessionStore
-from m365_copilot_openai_proxy.substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from teams_copilot_proxy.config import Settings
+from teams_copilot_proxy.session_store import PersistentSessionStore
+from teams_copilot_proxy.substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 
 
 class FakeCopilotClient:
@@ -151,12 +151,12 @@ def test_default_client_factory_reloads_token_from_env(tmp_path, monkeypatch) ->
     seen_tokens: list[str] = []
 
     class RecordingCopilotClient(FakeCopilotClient):
-        def __init__(self, access_token: str, _time_zone: str):
+        def __init__(self, access_token: str, _time_zone: str, _proxy: str = ""):
             super().__init__()
             seen_tokens.append(access_token)
 
     monkeypatch.setattr(
-        "m365_copilot_openai_proxy.app.SubstrateCopilotClient",
+        "teams_copilot_proxy.app.SubstrateCopilotClient",
         RecordingCopilotClient,
     )
     settings = Settings(M365_ACCESS_TOKEN=first_token)
@@ -215,7 +215,7 @@ def test_cli_knows_when_startup_capture_is_needed() -> None:
 
 
 def test_cli_startup_refresh_can_do_full_fallback(monkeypatch) -> None:
-    from m365_copilot_openai_proxy.cli import _startup_capture_loop
+    from teams_copilot_proxy.cli import _startup_capture_loop
 
     seen_allow_nudge: list[bool] = []
     capture_called = False
@@ -229,10 +229,10 @@ def test_cli_startup_refresh_can_do_full_fallback(monkeypatch) -> None:
         capture_called = True
         return False
 
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli._wait_for_m365_page", lambda _port, _timeout: True)
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli._try_auto_refresh", fake_refresh)
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli._capture_token_to_env", fake_capture)
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("teams_copilot_proxy.cli._wait_for_m365_page", lambda _port, _timeout: True)
+    monkeypatch.setattr("teams_copilot_proxy.cli._try_auto_refresh", fake_refresh)
+    monkeypatch.setattr("teams_copilot_proxy.cli._capture_token_to_env", fake_capture)
+    monkeypatch.setattr("teams_copilot_proxy.cli.time.sleep", lambda _seconds: None)
 
     _startup_capture_loop(9222, timeout_seconds=1)
 
@@ -241,7 +241,7 @@ def test_cli_startup_refresh_can_do_full_fallback(monkeypatch) -> None:
 
 
 def test_cli_startup_refresh_waits_for_m365_page(monkeypatch) -> None:
-    from m365_copilot_openai_proxy.cli import _startup_capture_loop
+    from teams_copilot_proxy.cli import _startup_capture_loop
 
     calls: list[str] = []
 
@@ -253,8 +253,8 @@ def test_cli_startup_refresh_waits_for_m365_page(monkeypatch) -> None:
         calls.append("refresh")
         return True
 
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli._wait_for_m365_page", fake_wait)
-    monkeypatch.setattr("m365_copilot_openai_proxy.cli._try_auto_refresh", fake_refresh)
+    monkeypatch.setattr("teams_copilot_proxy.cli._wait_for_m365_page", fake_wait)
+    monkeypatch.setattr("teams_copilot_proxy.cli._try_auto_refresh", fake_refresh)
 
     _startup_capture_loop(9222, timeout_seconds=1)
 
@@ -449,6 +449,209 @@ def test_anthropic_streaming_returns_error_event_on_upstream_failure() -> None:
     assert response.status_code == 200
     assert "event: error" in payload
     assert '"message": "upstream broke"' in payload
+
+
+SAMPLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    }
+]
+
+
+class ToolCallingCopilotClient(FakeCopilotClient):
+    def __init__(self, replies: list[str]):
+        super().__init__()
+        self.replies = list(replies)
+
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        self.calls.append((prompt, additional_context))
+        self.sessions.append(session)
+        return self.replies.pop(0)
+
+
+def test_chat_completion_returns_tool_calls_when_model_emits_tool_call_block() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["type"] == "function"
+    assert call["function"]["name"] == "read_file"
+    assert json.loads(call["function"]["arguments"]) == {"path": "main.py"}
+    tools_context = fake.calls[0][1]
+    assert any("Tool calling protocol" in part for part in tools_context)
+    assert any("read_file" in part for part in tools_context)
+
+
+def test_chat_completion_plain_text_with_tools_returns_stop() -> None:
+    fake = ToolCallingCopilotClient(["Just a normal answer."])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "Just a normal answer."
+
+
+def test_chat_completion_retries_once_on_malformed_tool_call() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            '```tool_call\n{"name": "read_file", "arguments": {broken\n```',
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert len(fake.calls) == 2
+    assert "could not be parsed" in fake.calls[1][0]
+
+
+def test_chat_completion_accepts_final_tool_message() -> None:
+    fake = ToolCallingCopilotClient(["Done, the file contains X."])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [
+                {"role": "user", "content": "Read a.py"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path": "a.py"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "print('hi')"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "Done, the file contains X."
+    prompt, context = fake.calls[0]
+    assert prompt.startswith("Tool result (call_1):")
+    assert "print('hi')" in prompt
+    assert any("[tool call]" in part for part in context)
+
+
+def test_streaming_with_tools_emits_tool_call_chunks() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = build_client(fake)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert '"tool_calls"' in payload
+    assert '"name": "read_file"' in payload
+    assert '"finish_reason": "tool_calls"' in payload
+    assert "data: [DONE]" in payload
+
+
+def test_streaming_with_tools_plain_text_falls_back_to_content() -> None:
+    fake = ToolCallingCopilotClient(["A plain streamed answer."])
+    client = build_client(fake)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert '"content": "A plain streamed answer."' in payload
+    assert '"finish_reason": "stop"' in payload
+
+
+def test_tool_protocol_rejects_unknown_tool_then_falls_back_to_text() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            '```tool_call\n{"name": "delete_everything", "arguments": {}}\n```',
+            "I cannot do that with the available tools.",
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Do something"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "I cannot do that with the available tools."
 
 
 def test_responses_requires_final_user_message() -> None:

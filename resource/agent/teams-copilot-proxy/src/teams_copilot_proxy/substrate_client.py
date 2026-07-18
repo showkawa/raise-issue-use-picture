@@ -82,14 +82,15 @@ class SubstrateCopilotError(RuntimeError):
 
 
 class SubstrateCopilotClient:
-    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo"):
+    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo", proxy: str = ""):
         if not access_token:
             raise SubstrateCopilotError(
                 "M365_ACCESS_TOKEN is missing. Start the debug Edge window and let startup token capture complete, "
-                "or run `uv run copilot-openai-proxy set-token`."
+                "or run `uv run teams-copilot-proxy set-token`."
             )
         self._token = access_token
         self._time_zone = time_zone
+        self._proxy = proxy
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -216,6 +217,7 @@ class SubstrateCopilotClient:
                 additional_headers={
                     "Origin": "https://m365.cloud.microsoft",
                 },
+                proxy=self._proxy or True,
             ) as ws:
                 await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
                 await ws.recv()
