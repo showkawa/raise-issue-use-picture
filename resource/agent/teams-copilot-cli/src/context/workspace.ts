@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { walkFiles } from '../agent/tools/fs-utils.js';
 import type { WorkspaceInfo } from '../agent/system-prompt.js';
+import { isSensitivePath, redactSecrets } from '../agent/redaction.js';
 import { loadMemory } from './memory.js';
 
 const REPO_MAP_MAX_ENTRIES = 200;
@@ -65,8 +66,12 @@ export function expandFileReferences(input: string, projectRoot: string): string
     const relPath = match[1];
     const absolute = resolve(projectRoot, relPath);
     if (!absolute.startsWith(resolve(projectRoot)) || !existsSync(absolute)) continue;
+    if (isSensitivePath(relPath)) {
+      attachments.push(`\n\n文件 ${relPath}：已跳过（敏感文件，不发送给 Copilot）。`);
+      continue;
+    }
     try {
-      let content = readFileSync(absolute, 'utf8');
+      let content = redactSecrets(readFileSync(absolute, 'utf8'));
       if (content.length > budget) {
         content = `${content.slice(0, budget)}\n...[内容过长已截断]`;
       }

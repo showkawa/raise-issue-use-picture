@@ -50,6 +50,13 @@ describe('read_file / write_file / edit_file', () => {
     expect((await readFileTool.run({ path: 'missing.txt' }, ctx)).ok).toBe(false);
   });
 
+  it('read_file refuses sensitive files', async () => {
+    writeFileSync(join(root, '.env'), 'API_TOKEN=supersecretvalue\n');
+    const result = await readFileTool.run({ path: '.env' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain('拒绝读取敏感文件');
+  });
+
   it('edit_file replaces exact unique matches', async () => {
     writeFileSync(join(root, 'a.ts'), 'const x = 1;\nconst y = 2;\n');
     const result = await editFileTool.run({ path: 'a.ts', old: 'const x = 1;', new: 'const x = 9;' }, ctx);

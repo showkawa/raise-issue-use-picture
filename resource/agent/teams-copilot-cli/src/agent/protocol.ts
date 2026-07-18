@@ -1,5 +1,6 @@
 import type { JsonSchemaLite } from './tools/types.js';
 import { validateArgs } from './tools/types.js';
+import { redactSecrets } from './redaction.js';
 
 export interface ToolCall {
   name: string;
@@ -157,7 +158,7 @@ export function formatToolResults(
   const budget = Math.max(500, options.maxChars - header.length - 100);
   const perResult = Math.max(200, Math.floor(budget / Math.max(1, results.length)));
   const blocks = results.map((result) => {
-    const body = truncateMiddle(escapeFences(result.output), perResult);
+    const body = truncateMiddle(escapeFences(redactSecrets(result.output)), perResult);
     const exit = result.exitCode !== undefined ? ` exit="${result.exitCode}"` : '';
     return `<<<RESULT name="${result.name}" ok="${result.ok}"${exit}\n${body}\n>>>`;
   });

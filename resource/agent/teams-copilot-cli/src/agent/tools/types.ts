@@ -19,6 +19,8 @@ export interface ToolContext {
   /** Absolute path of the project root; all paths must resolve inside it. */
   projectRoot: string;
   report?: (message: string) => void;
+  /** Glob patterns for files that must not be read (defaults applied when omitted). */
+  denyReadGlobs?: string[];
 }
 
 export interface ToolResult {

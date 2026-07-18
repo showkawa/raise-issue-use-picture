@@ -1,4 +1,5 @@
 import type { Tool } from './tools/types.js';
+import { redactSecrets } from './redaction.js';
 
 export interface WorkspaceInfo {
   projectRoot: string;
@@ -64,11 +65,11 @@ export function buildProtocolPrompt(
     `- 项目根: ${workspace.projectRoot}`,
     '',
     '## 仓库结构',
-    workspace.repoMap || '(空仓库)',
+    redactSecrets(workspace.repoMap) || '(空仓库)',
   ];
 
   if (workspace.memory) {
-    sections.push('', '## 项目约定（AGENTS.md）', workspace.memory);
+    sections.push('', '## 项目约定（AGENTS.md）', redactSecrets(workspace.memory));
   }
 
   sections.push(
