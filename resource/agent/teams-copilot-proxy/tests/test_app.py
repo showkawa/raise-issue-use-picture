@@ -785,6 +785,79 @@ def test_turn_aware_truncation_keeps_tool_call_with_result_within_budget() -> No
     assert len(transcript) <= budget
 
 
+SECRET_BEARER = "Bearer AbC123dEf456GhI789jklMNO"
+SECRET_OPENAI_KEY = "sk-ABCDEFGHIJKLMNOP1234567890"
+SECRET_ENV_LINE = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIexample123"
+
+
+def test_outbound_redaction_scrubs_secrets_in_prompt() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": f"token {SECRET_BEARER} key {SECRET_OPENAI_KEY}"}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt, _context = fake.calls[0]
+    assert "AbC123dEf456GhI789jklMNO" not in prompt
+    assert SECRET_OPENAI_KEY not in prompt
+    assert "[REDACTED]" in prompt
+
+
+def test_outbound_redaction_scrubs_secrets_in_transcript() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": "set up creds"},
+                {"role": "assistant", "content": SECRET_ENV_LINE},
+                {"role": "user", "content": "continue"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    transcript = _transcript_sent(fake)
+    assert "wJalrXUtnFEMIexample123" not in transcript
+    assert "AWS_SECRET_ACCESS_KEY=[REDACTED]" in transcript
+
+
+def test_outbound_redaction_can_be_disabled() -> None:
+    fake = FakeCopilotClient()
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_REDACT_OUTBOUND=False)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": f"key {SECRET_OPENAI_KEY}"}]},
+    )
+
+    assert response.status_code == 200
+    prompt, _context = fake.calls[0]
+    assert SECRET_OPENAI_KEY in prompt
+
+
+def test_outbound_redaction_does_not_change_response() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": f"key {SECRET_OPENAI_KEY}"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
+
+
 def test_responses_requires_final_user_message() -> None:
     client = build_client(FakeCopilotClient())
     response = client.post(

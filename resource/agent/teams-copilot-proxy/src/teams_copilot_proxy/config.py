@@ -17,3 +17,4 @@ class Settings(BaseSettings):
     max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
     proxy: str = Field(default="", alias="M365_PROXY")
     tool_correction_retries: int = Field(default=1, alias="M365_TOOL_CORRECTION_RETRIES")
+    redact_outbound: bool = Field(default=True, alias="M365_REDACT_OUTBOUND")

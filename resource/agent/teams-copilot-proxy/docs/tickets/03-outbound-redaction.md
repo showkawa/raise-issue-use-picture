@@ -8,10 +8,10 @@ it only affects what is sent upstream — it never alters what OpenCode stores l
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A redaction transform runs on the outbound prompt and additional context between request translation and the Substrate client, so all entry points can reuse it.
-- [ ] Common secret shapes (API keys, bearer/JWT tokens, private-key blocks, `KEY=value` env secrets) are detected and replaced with a non-reversible placeholder.
-- [ ] A `M365_*`-style setting toggles redaction on/off; default is on.
-- [ ] Redaction does not change the response returned to the client, only what is sent upstream.
-- [ ] Tests at the HTTP seam send a request whose transcript/tool result contains secret-like strings and assert the fake client received a scrubbed transcript with the secrets absent.
+- [x] A redaction transform runs on the outbound prompt and additional context between request translation and the Substrate client, so all entry points can reuse it. (`redaction.redact_outbound`, applied in all three endpoints via `_redact_translated`)
+- [x] Common secret shapes (API keys, bearer/JWT tokens, private-key blocks, `KEY=value` env secrets) are detected and replaced with a non-reversible placeholder. (`[REDACTED]`)
+- [x] A `M365_*`-style setting toggles redaction on/off; default is on. (`M365_REDACT_OUTBOUND`, default true)
+- [x] Redaction does not change the response returned to the client, only what is sent upstream.
+- [x] Tests at the HTTP seam send a request whose transcript/tool result contains secret-like strings and assert the fake client received a scrubbed transcript with the secrets absent.

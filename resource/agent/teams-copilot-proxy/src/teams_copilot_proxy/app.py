@@ -12,7 +12,8 @@ from .config import Settings
 from .session_store import PersistentSession, PersistentSessionStore
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
-from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
+from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest, TranslatedRequest
+from .redaction import redact_outbound
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
@@ -79,6 +80,7 @@ def create_app(
     ):
         try:
             translated = translate_openai_request(request, settings.max_transcript_chars)
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:
                 if request.tools:
@@ -144,6 +146,7 @@ def create_app(
         try:
             request = OpenAIResponsesRequest.model_validate(body)
             translated = translate_responses_request(request)
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -182,6 +185,7 @@ def create_app(
     ):
         try:
             translated = translate_anthropic_request(request)
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw_request, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -209,6 +213,15 @@ def create_app(
         })
 
     return app
+
+
+def _redact_translated(translated: TranslatedRequest, settings: Settings) -> TranslatedRequest:
+    if not settings.redact_outbound:
+        return translated
+    prompt, additional_context = redact_outbound(
+        translated.prompt, translated.additional_context
+    )
+    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
 
 
 def _persistent_session(
