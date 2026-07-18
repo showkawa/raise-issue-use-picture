@@ -10,8 +10,27 @@
 
 **Stateless Replay** — The conversation strategy for tool loops: every request re-sends the full client-provided history (including tool results) as a flattened transcript; the Copilot side keeps no memory.
 
-**Correction Retry** — The single automatic re-ask sent to Copilot when its reply looks like a tool call attempt but cannot be parsed. If the retry also fails, the reply degrades to plain text.
+**Correction Retry** — The automatic re-ask(s) sent to Copilot when its reply looks like a tool-call attempt but cannot be parsed. Configurable count with escalating strictness; if all attempts fail, the reply becomes a Failure Sentinel rather than being passed through as a real answer.
 
-**Transcript Budget** — The character limit (`M365_MAX_TRANSCRIPT_CHARS`) applied to the flattened prior-conversation transcript; oldest lines are dropped first.
+**Failure Sentinel** — The explicit "Copilot could not produce a valid tool call" message the proxy returns (with `finish_reason: stop`) after Correction Retry is exhausted, so the loop stops visibly instead of surfacing malformed text as if it were the final answer.
+_Avoid_: degrade-to-text
 
-**Persistent Session** — A Copilot-side conversation reused across turns via the `:persist` model suffix or `X-M365-Session-Id` header. Orthogonal to (and not used by) Stateless Replay tool loops.
+**Transcript Budget** — The character limit (`M365_MAX_TRANSCRIPT_CHARS`) applied to the flattened prior-conversation transcript. A last-resort safety net only: OpenCode owns primary context bounding. Truncation is Turn-Aware.
+
+**Turn-Aware Truncation** — Transcript Budget trimming that never splits a Tool Call Envelope from its matching tool result, preserving protocol pairing.
+
+**Persistent Session** — A Copilot-side conversation reused across turns via the `:persist` model suffix or `X-M365-Session-Id` header. Orthogonal to (and deliberately not used by) the OpenCode integration, which is Stateless.
+
+## OpenCode integration
+
+**OpenCode** — The terminal coding agent (`@ai-sdk/openai-compatible` provider) that owns the Agent Loop, executes tools locally, and treats the proxy as its model. Copilot never executes anything.
+
+**Agent Loop** — The tool-execution iteration. Owned by OpenCode, not the proxy: OpenCode selects a tool, runs it, appends the result to the history, and re-asks. Copilot only reasons and picks the next tool (one per turn).
+_Avoid_: loop (unqualified), orchestrator
+
+**Model Endpoint** — The proxy's role in this integration: an OpenAI-compatible `/v1/chat/completions` surface that makes Copilot look like a tool-calling model to OpenCode.
+_Avoid_: gateway, orchestrator
+
+**Local Execution Permission** — OpenCode's own permission gate over local tool execution (bash/edit/write approval, dangerous-pattern deny). Guards the user's machine. Distinct from Outbound Redaction.
+
+**Outbound Redaction** — The proxy-side scrubbing of secrets/sensitive content from the transcript before it is sent to Microsoft's Substrate API. The only layer on the wire to Microsoft; complements, and does not overlap with, Local Execution Permission.
