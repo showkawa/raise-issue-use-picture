@@ -56,6 +56,26 @@ model output as a final answer. The sentinel string is:
 A clean plain-text reply (no `tool_call` fence) is always treated as a successful final answer and
 never triggers a correction attempt.
 
+## System prompt suppression when tools are present
+
+OpenCode's built-in system prompt is written for models with native function calling and tells
+the model to "output text to communicate" and answer concisely in prose. Fed to the Copilot
+browser channel verbatim, it reliably pushes Copilot into a conversational refusal ("I can't
+access your local files, please upload them") — and even a hallucinated `/mnt/data` sandbox —
+instead of emitting a `tool_call`. Piling on extra override instructions does not beat it; the
+only reliable fix is to stop forwarding that framing.
+
+So when a request carries `tools`, the proxy drops the client system prompt and lets the tool
+protocol be the only authoritative system instruction Copilot sees. This is controlled by
+`M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` (default on). Requests without tools keep the system
+prompt unchanged. A short high-recency tool reminder is also appended after the user prompt, and
+Copilot's own code-interpreter option sets are disabled, to further discourage the sandbox
+persona.
+
+Trade-off: Copilot no longer sees OpenCode's environment framing (working directory, `AGENTS.md`
+rules, conventions) on tool turns, so it may probe with `bash`/`glob` to locate paths before
+acting. Set the flag to `false` to forward the full system prompt if you prefer.
+
 ## Context budget (safety net)
 
 OpenCode is the primary context bounder via `limit.context` and its own compaction. The proxy's

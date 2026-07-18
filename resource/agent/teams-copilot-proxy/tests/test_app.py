@@ -19,7 +19,11 @@ from teams_copilot_proxy.cli import (
 )
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.session_store import PersistentSessionStore
-from teams_copilot_proxy.substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from teams_copilot_proxy.substrate_client import (
+    _OPTIONS_SETS,
+    SubstrateCopilotClient,
+    SubstrateCopilotError,
+)
 from teams_copilot_proxy.tool_protocol import TOOL_FAILURE_SENTINEL
 
 
@@ -723,6 +727,121 @@ def test_correction_count_is_configurable_and_final_attempt_is_strict() -> None:
     assert len(fake.calls) == 3
     assert "final attempt" in fake.calls[2][0]
     assert "final attempt" not in fake.calls[1][0]
+
+
+def test_tool_reminder_is_appended_after_prompt_when_tools_present() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "看下当前项目下的README.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt = fake.calls[0][0]
+    assert prompt.startswith("看下当前项目下的README.md")
+    assert "tool-calling reminder" in prompt
+    assert "read_file" in prompt
+    assert prompt.rstrip().endswith(
+        "Reply with plain text only when the task is fully complete and no tool is needed."
+    )
+
+
+def test_system_prompt_is_suppressed_when_tools_present() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [
+                {"role": "system", "content": "You are opencode. You cannot access files."},
+                {"role": "user", "content": "看下当前项目下的README.md"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert not any(part.startswith("System instructions:") for part in context)
+    assert not any("cannot access files" in part for part in context)
+    assert any("Tool calling protocol" in part for part in context)
+
+
+def test_system_prompt_kept_when_no_tools() -> None:
+    fake = ToolCallingCopilotClient(["plain answer"])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": "hi"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert any(part.startswith("System instructions:") for part in context)
+
+
+def test_system_prompt_kept_with_tools_when_suppression_disabled() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
+    )
+    settings = Settings(
+        M365_ACCESS_TOKEN="fake-token",
+        M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=False,
+    )
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [
+                {"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": "read a.py"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert any(part.startswith("System instructions:") for part in context)
+
+
+def test_code_interpreter_option_sets_are_disabled() -> None:
+    assert not any("code_interpreter" in option for option in _OPTIONS_SETS)
+
+
+def test_no_tool_reminder_when_no_tools() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt = fake.calls[0][0]
+    assert "tool-calling reminder" not in prompt
+    assert prompt == "hello"
 
 
 def _transcript_sent(fake: FakeCopilotClient) -> str:

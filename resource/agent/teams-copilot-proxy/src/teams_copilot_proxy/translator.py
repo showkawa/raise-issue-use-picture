@@ -8,7 +8,7 @@ from .models import (
     OpenAIChatRequest,
     TranslatedRequest,
 )
-from .tool_protocol import render_tool_instructions
+from .tool_protocol import render_tool_instructions, tool_reminder
 
 
 def flatten_content(content: str | list[ContentPart] | None) -> str:
@@ -99,6 +99,7 @@ def _truncate_transcript(transcript_lines: list[str], budget: int) -> list[str]:
 def translate_openai_request(
     request: OpenAIChatRequest,
     max_transcript_chars: int = 0,
+    suppress_system_prompt_with_tools: bool = False,
 ) -> TranslatedRequest:
     system_lines: list[str] = []
     transcript_lines: list[str] = []
@@ -128,7 +129,13 @@ def translate_openai_request(
 
     additional_context: list[str] = []
     system_text = _join_lines(system_lines)
-    if system_text:
+    # Client system prompts (e.g. OpenCode's) are written for native function
+    # calling and push the browser-channel model into "I cannot access your
+    # files" prose instead of emitting a tool_call. When tools are present we
+    # drop that framing so the tool protocol is the only authoritative system
+    # instruction the model sees.
+    suppress_system = bool(request.tools) and suppress_system_prompt_with_tools
+    if system_text and not suppress_system:
         additional_context.append(f"System instructions:\n{system_text}")
     if request.tools:
         additional_context.append(render_tool_instructions(request.tools))
@@ -136,6 +143,8 @@ def translate_openai_request(
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
+    if request.tools:
+        prompt = f"{prompt}{tool_reminder(request.tools)}"
     return TranslatedRequest(prompt=prompt, additional_context=additional_context)
 
 

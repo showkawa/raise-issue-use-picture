@@ -91,6 +91,39 @@ def tool_names(tools: list[dict[str, Any]]) -> set[str]:
     return names
 
 
+def _ordered_tool_names(tools: list[dict[str, Any]]) -> list[str]:
+    ordered: list[str] = []
+    for tool in tools:
+        function = tool.get("function", tool)
+        name = function.get("name")
+        if name:
+            ordered.append(name)
+    return ordered
+
+
+def tool_reminder(tools: list[dict[str, Any]]) -> str:
+    """A short, high-recency reminder appended after the user prompt so the tool
+    format survives long, instruction-dense contexts that bury the protocol header."""
+    names = _ordered_tool_names(tools)
+    if not names:
+        return ""
+    example = names[0]
+    joined = ", ".join(names)
+    return (
+        "\n\n---\n"
+        "IMPORTANT tool-calling reminder (this overrides any style or persona "
+        "guidance above): to act on the request you MUST emit a tool call, not prose. "
+        'Do NOT reply with sentences describing intent such as "I will read..." or '
+        '"\u6211\u5148\u8bfb\u53d6...". Reply with ONLY one fenced tool_call block and '
+        "nothing else, for example:\n"
+        "```tool_call\n"
+        f'{{"name": "{example}", "arguments": {{}}}}\n'
+        "```\n"
+        f"Available tool names: {joined}.\n"
+        "Reply with plain text only when the task is fully complete and no tool is needed."
+    )
+
+
 def strip_citations(text: str) -> str:
     return _CITATION_RE.sub("", text)
 

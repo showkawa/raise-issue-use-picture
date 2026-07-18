@@ -79,7 +79,11 @@ def create_app(
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
         try:
-            translated = translate_openai_request(request, settings.max_transcript_chars)
+            translated = translate_openai_request(
+                request,
+                settings.max_transcript_chars,
+                settings.suppress_system_prompt_with_tools,
+            )
             translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:

@@ -40,17 +40,15 @@ _VARIANTS = (
     "feature.MacOutlookHubToHelix,Agt_bizchat_enableGpt5ForHelix"
 )
 
+# Code-interpreter option sets are intentionally omitted: with them enabled
+# Copilot assumes it has its own sandbox (hallucinating paths like /mnt/data)
+# and answers in prose instead of emitting the client-side tool_call the
+# OpenCode integration depends on.
 _OPTIONS_SETS = [
     "search_result_progress_messages_with_search_queries",
     "cwc_flux_image",
-    "cwc_code_interpreter",
-    "cwc_code_interpreter_amsfix",
     "cwcfluxgptv",
     "flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch",
-    "cwc_code_interpreter_citation_fix",
-    "code_interpreter_interactive_charts",
-    "cwc_code_interpreter_interactive_charts_inline_image",
-    "code_interpreter_matplotlib_patching",
     "cwc_fileupload_odb",
     "update_memory_plugin",
     "add_custom_instructions",
