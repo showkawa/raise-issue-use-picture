@@ -27,7 +27,7 @@ export interface ImplementCommandOpts extends CommandOpts {
 }
 
 /** Refuses to start on a dirty worktree unless --allow-dirty, so the agent never
- *  commits or clobbers the user's uncommitted changes (ADR-0005). */
+ *  commits or clobbers the user's uncommitted changes. */
 export function ensureCleanWorktree(changed: string[], allowDirty: boolean): void {
   if (changed.length > 0 && !allowDirty) {
     throw new Error(

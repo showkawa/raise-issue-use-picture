@@ -14,7 +14,7 @@ export type AuditLogger = (entry: AuditEntry) => void;
 
 /**
  * Creates an append-only audit logger that records every tool call and permission
- * decision as one JSON line under <projectRoot>/.teams-copilot/audit.log (ADR-0008).
+ * decision as one JSON line under <projectRoot>/.teams-copilot/audit.log.
  */
 export function createAuditLogger(
   projectRoot: string,

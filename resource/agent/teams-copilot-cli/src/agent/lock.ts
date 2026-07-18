@@ -37,7 +37,7 @@ function readLock(path: string): LockInfo | null {
 
 /**
  * Acquires an exclusive project-root lock so two agent runs can't clobber the same
- * worktree concurrently (ADR-0008). Stale or dead-pid locks are reclaimed.
+ * worktree concurrently. Stale or dead-pid locks are reclaimed.
  */
 export function acquireLock(
   projectRoot: string,

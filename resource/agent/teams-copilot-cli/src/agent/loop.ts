@@ -81,12 +81,12 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
 
   async function send(message: string, stream = false): Promise<ChatTurnResult> {
     // Tag every outbound message with a monotonic [turn N] and check the reply echoes
-    // it back, so request/response drift on the copilot-web channel is detectable (ADR-0008).
+    // it back, so request/response drift on the copilot-web channel is detectable.
     turnSeq += 1;
     const turn = turnSeq;
     const tagged = tagTurn(turn, message);
     // Add up to 30% random jitter to the send interval so the cadence doesn't look
-    // like a fixed-rate bot to the Copilot tenant's abuse detection (ADR-0007).
+    // like a fixed-rate bot to the Copilot tenant's abuse detection.
     const interval = config.minSendIntervalMs;
     const jitter = interval > 0 ? Math.floor(Math.random() * interval * 0.3) : 0;
     const wait = interval + jitter - (Date.now() - lastSendAt);
@@ -242,7 +242,7 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
 }
 
 /**
- * Shrinks the RESULT reinjection budget as the session fills up (ADR-0004): once past
+ * Shrinks the RESULT reinjection budget as the session fills up: once past
  * 60% of the session char budget, halve the per-message budget (floored at 1500).
  */
 export function shrinkResultBudget(

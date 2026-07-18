@@ -1,5 +1,5 @@
 /**
- * Token-level classification of shell commands (ADR-0008). Used to flag destructive
+ * Token-level classification of shell commands. Used to flag destructive
  * operations regardless of where they appear in the string (not substring-only), and
  * to reject interactive programs that would hang a non-interactive agent run.
  */

@@ -92,7 +92,7 @@ describe('runAgent (MockProvider integration)', () => {
     expect(injections.length).toBe(2);
   });
 
-  it('tags outbound messages with [turn N] and detects ack misalignment (ADR-0008)', async () => {
+  it('tags outbound messages with [turn N] and detects ack misalignment', async () => {
     writeFileSync(join(root, 'app.txt'), 'v=1\n');
     const statuses: string[] = [];
     const provider = new MockProvider([], {

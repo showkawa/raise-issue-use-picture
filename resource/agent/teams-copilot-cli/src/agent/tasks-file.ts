@@ -21,7 +21,7 @@ export interface MalformedTaskLine {
 
 /**
  * Finds lines that look like an intended task checkbox but are not parseable, so the
- * caller can surface them instead of silently dropping tasks (ticket 07 / ADR-0009).
+ * caller can surface them instead of silently dropping tasks.
  */
 export function findMalformedTaskLines(content: string): MalformedTaskLine[] {
   const malformed: MalformedTaskLine[] = [];

@@ -156,7 +156,7 @@ describe('system prompt', () => {
   });
 });
 
-describe('turn tagging (ADR-0008)', () => {
+describe('turn tagging', () => {
   it('tags a message with [turn N] and parses the ack back', () => {
     expect(tagTurn(7, 'hello')).toBe('[turn 7]\nhello');
     expect(parseTurnAck('[ack turn 7]\n继续')).toBe(7);

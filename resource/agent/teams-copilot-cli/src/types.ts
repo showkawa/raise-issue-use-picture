@@ -41,7 +41,7 @@ export interface AgentConfig {
   maxMessageChars: number;
   denyCommands: string[];
   allowCommands: string[];
-  /** Per-session bidirectional character budget before proactive rotation (ADR-0004). */
+  /** Per-session bidirectional character budget before proactive rotation. */
   sessionCharBudget?: number;
 }
 

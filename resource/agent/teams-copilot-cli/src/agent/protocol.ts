@@ -146,7 +146,7 @@ export function escapeFences(text: string): string {
 }
 
 /**
- * Turn tagging (ADR-0008): every outbound message is prefixed with `[turn N]` and the
+ * Turn tagging: every outbound message is prefixed with `[turn N]` and the
  * model is asked to echo `[ack turn N]`. A mismatch lets the loop detect that a reply
  * belongs to a different request (request/response drift on the copilot-web channel).
  */

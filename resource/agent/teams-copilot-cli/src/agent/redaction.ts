@@ -2,7 +2,6 @@
  * Small, precise secret redaction applied to everything sent to the Copilot tenant
  * (tool results, repo map, @file injections). Deliberately conservative — prefers
  * missing a secret over corrupting normal code, which would break edit_file matching.
- * See ADR-0006.
  */
 
 interface RedactionRule {

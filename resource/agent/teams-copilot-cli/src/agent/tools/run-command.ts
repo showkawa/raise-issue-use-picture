@@ -4,7 +4,7 @@ import { resolveInsideRoot } from './fs-utils.js';
 import { detectInteractive } from '../command-classify.js';
 
 const DEFAULT_TIMEOUT_MS = 120000;
-// ~64KB total output cap (ADR-0008): ~32KB per stream.
+// ~64KB total output cap: ~32KB per stream.
 const MAX_OUTPUT_CHARS = 32 * 1024;
 
 export interface RunCommandArgs {
