@@ -57,10 +57,22 @@ describe('read_file / write_file / edit_file', () => {
     expect(readFileSync(join(root, 'a.ts'), 'utf8')).toContain('const x = 9;');
   });
 
-  it('edit_file rejects missing old and returns nearby disk context', async () => {
+  it('edit_file falls back to whitespace-normalized matching and replaces disk original', async () => {
+    // Disk has tab indentation and CRLF; model supplies spaces + LF + drifted internal spacing.
+    writeFileSync(join(root, 'a.ts'), 'function greet() {\r\n\treturn "hello world";\r\n}\r\n');
+    const result = await editFileTool.run(
+      { path: 'a.ts', old: '    return "hello  world";', new: '\treturn "hi";' },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    const after = readFileSync(join(root, 'a.ts'), 'utf8');
+    expect(after).toBe('function greet() {\r\n\treturn "hi";\r\n}\r\n');
+  });
+
+  it('edit_file reports genuine misses with nearby disk context', async () => {
     writeFileSync(join(root, 'a.ts'), 'function greet() {\n  return "hello world";\n}\n');
     const result = await editFileTool.run(
-      { path: 'a.ts', old: '  return "hello  world";', new: 'x' },
+      { path: 'a.ts', old: '  return "hello world"; // a trailing comment not on disk', new: 'x' },
       ctx,
     );
     expect(result.ok).toBe(false);
@@ -68,7 +80,19 @@ describe('read_file / write_file / edit_file', () => {
     expect(result.output).toContain('return "hello world"');
   });
 
-  it('edit_file rejects ambiguous old unless all=true', async () => {
+  it('edit_file refuses a non-unique normalized match unless all=true', async () => {
+    // Internal double spaces on disk mean the exact single-space `old` is absent,
+    // so the normalized cascade runs and finds two candidates.
+    writeFileSync(join(root, 'a.ts'), '  value  =  1;\n\tvalue  =  1;\n');
+    const ambiguous = await editFileTool.run({ path: 'a.ts', old: 'value = 1;', new: 'value = 2;' }, ctx);
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.output).toContain('无法确定');
+    const all = await editFileTool.run({ path: 'a.ts', old: 'value = 1;', new: 'value = 2;', all: true }, ctx);
+    expect(all.ok).toBe(true);
+    expect(readFileSync(join(root, 'a.ts'), 'utf8')).toBe('value = 2;\nvalue = 2;\n');
+  });
+
+  it('edit_file rejects ambiguous exact old unless all=true', async () => {
     writeFileSync(join(root, 'a.ts'), 'dup\ndup\n');
     const ambiguous = await editFileTool.run({ path: 'a.ts', old: 'dup', new: 'x' }, ctx);
     expect(ambiguous.ok).toBe(false);

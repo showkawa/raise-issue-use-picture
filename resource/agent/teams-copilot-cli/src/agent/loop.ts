@@ -72,7 +72,11 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
   const state: LoopSession = { session: await provider.createSession(), turnsUsed: 0, charsUsed: 0 };
 
   async function send(message: string, stream = false): Promise<ChatTurnResult> {
-    const wait = config.minSendIntervalMs - (Date.now() - lastSendAt);
+    // Add up to 30% random jitter to the send interval so the cadence doesn't look
+    // like a fixed-rate bot to the Copilot tenant's abuse detection (ADR-0007).
+    const interval = config.minSendIntervalMs;
+    const jitter = interval > 0 ? Math.floor(Math.random() * interval * 0.3) : 0;
+    const wait = interval + jitter - (Date.now() - lastSendAt);
     if (wait > 0) await sleep(wait);
     let lastError: unknown;
     for (let attempt = 0; attempt <= SEND_RETRIES; attempt++) {

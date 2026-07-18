@@ -1,7 +1,6 @@
 import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
-import type { PermissionMode } from '../types.js';
 import { loadConfig } from '../provider/copilot-web/config.js';
 import { createProvider } from '../provider/factory.js';
 import { runAgent } from '../agent/loop.js';
@@ -11,6 +10,7 @@ import { markTaskDone, parseTasks, type TaskItem } from '../agent/tasks-file.js'
 import { buildWorkspaceInfo } from '../context/workspace.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
+import { noticeEgressOnce, resolvePermissionMode, warnYoloMode } from './notices.js';
 
 export interface ImplementCommandOpts extends CommandOpts {
   tasks?: string;
@@ -18,6 +18,8 @@ export interface ImplementCommandOpts extends CommandOpts {
   continueOnFailure?: boolean;
   commit?: boolean;
   permissionMode?: string;
+  yolo?: boolean;
+  ask?: boolean;
   maxIterations?: string;
 }
 
@@ -44,12 +46,7 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
   const tasksPath = resolve(workspace.projectRoot, opts.tasks ?? 'output/TASKS.md');
   const config = loadConfig(opts.config);
   config.browser = { ...config.browser, ...browserFlagsFromOptions(opts) };
-  if (opts.permissionMode) {
-    if (!['yolo', 'allowlist', 'ask'].includes(opts.permissionMode)) {
-      throw new Error(`Invalid permission mode: ${opts.permissionMode}`);
-    }
-    config.agent.permissionMode = opts.permissionMode as PermissionMode;
-  }
+  config.agent.permissionMode = resolvePermissionMode(config.agent.permissionMode, opts);
   if (opts.maxIterations) {
     const parsed = Number.parseInt(opts.maxIterations, 10);
     if (!Number.isInteger(parsed) || parsed < 1) {
@@ -82,6 +79,9 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
     process.stderr.write('[tcc] 工作树不干净，已禁用自动 commit（避免把你已有的改动一并提交）。\n');
     autoCommit = false;
   }
+
+  noticeEgressOnce();
+  warnYoloMode(config.agent.permissionMode);
 
   const provider = createProvider(config, reportStatus);
   await provider.init();

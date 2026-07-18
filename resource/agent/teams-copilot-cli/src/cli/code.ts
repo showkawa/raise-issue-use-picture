@@ -1,5 +1,4 @@
 import { createInterface } from 'readline';
-import type { PermissionMode } from '../types.js';
 import { loadConfig } from '../provider/copilot-web/config.js';
 import { createProvider } from '../provider/factory.js';
 import { runAgent } from '../agent/loop.js';
@@ -8,9 +7,12 @@ import { createDefaultRegistry } from '../agent/tools/registry.js';
 import { buildWorkspaceInfo, expandFileReferences } from '../context/workspace.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
+import { noticeEgressOnce, resolvePermissionMode, warnYoloMode } from './notices.js';
 
 export interface CodeCommandOpts extends CommandOpts {
   permissionMode?: string;
+  yolo?: boolean;
+  ask?: boolean;
   maxIterations?: string;
 }
 
@@ -39,12 +41,7 @@ function interactiveConfirm(): ConfirmHandler | undefined {
 export async function codeCommand(task: string, opts: CodeCommandOpts): Promise<void> {
   const config = loadConfig(opts.config);
   config.browser = { ...config.browser, ...browserFlagsFromOptions(opts) };
-  if (opts.permissionMode) {
-    if (!['yolo', 'allowlist', 'ask'].includes(opts.permissionMode)) {
-      throw new Error(`Invalid permission mode: ${opts.permissionMode}`);
-    }
-    config.agent.permissionMode = opts.permissionMode as PermissionMode;
-  }
+  config.agent.permissionMode = resolvePermissionMode(config.agent.permissionMode, opts);
   if (opts.maxIterations) {
     const parsed = Number.parseInt(opts.maxIterations, 10);
     if (!Number.isInteger(parsed) || parsed < 1) {
@@ -52,6 +49,9 @@ export async function codeCommand(task: string, opts: CodeCommandOpts): Promise<
     }
     config.agent.maxIterations = parsed;
   }
+
+  noticeEgressOnce();
+  warnYoloMode(config.agent.permissionMode);
 
   const workspace = buildWorkspaceInfo();
   const expandedTask = expandFileReferences(task, workspace.projectRoot);

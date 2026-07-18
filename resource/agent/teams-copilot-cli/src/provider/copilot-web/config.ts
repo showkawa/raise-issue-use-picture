@@ -5,11 +5,11 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 const AGENT_DEFAULTS: AgentConfig = {
-  permissionMode: 'yolo',
+  permissionMode: 'allowlist',
   maxIterations: 25,
   maxContinuations: 4,
   maxTurnsPerConversation: 30,
-  minSendIntervalMs: 1500,
+  minSendIntervalMs: 3000,
   maxMessageChars: 8000,
   denyCommands: [
     'rm -rf',

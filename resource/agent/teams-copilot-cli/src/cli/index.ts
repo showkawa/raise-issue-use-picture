@@ -70,7 +70,9 @@ program
 program
   .command('code <task...>')
   .description('Run the coding agent on a task in the current repo; use @file to attach file contents')
-  .option('--permission-mode <mode>', 'yolo | allowlist | ask')
+  .option('--permission-mode <mode>', 'yolo | allowlist | ask (default: allowlist)')
+  .option('--yolo', 'Shortcut for --permission-mode yolo (auto-runs every tool; dangerous)')
+  .option('--ask', 'Shortcut for --permission-mode ask (confirm every tool call)')
   .option('--max-iterations <n>', 'Max agent iterations')
   .action(async (task: string[], opts) => {
     const globalOpts = program.opts();
@@ -88,7 +90,9 @@ program
   .option('--task <id>', 'Run only the task with this id (e.g. T2)')
   .option('--continue-on-failure', 'Continue with the next task when one fails')
   .option('--commit', 'Auto git-commit changed files after each successful task (requires a clean worktree)')
-  .option('--permission-mode <mode>', 'yolo | allowlist | ask')
+  .option('--permission-mode <mode>', 'yolo | allowlist | ask (default: allowlist)')
+  .option('--yolo', 'Shortcut for --permission-mode yolo (auto-runs every tool; dangerous)')
+  .option('--ask', 'Shortcut for --permission-mode ask (confirm every tool call)')
   .option('--max-iterations <n>', 'Max agent iterations per task')
   .action(async (opts) => {
     const globalOpts = program.opts();
