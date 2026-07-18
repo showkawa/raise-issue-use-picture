@@ -13,6 +13,11 @@ _TOOL_CALL_FENCE_RE = re.compile(
 
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
 
+TOOL_FAILURE_SENTINEL = (
+    "[teams-copilot-proxy] Copilot could not produce a valid tool call after repeated "
+    "attempts. Please rephrase the request or continue manually."
+)
+
 _PROTOCOL_HEADER = """Tool calling protocol:
 You have access to the tools listed below. The tools are executed by the client on the user's machine; you cannot execute them yourself.
 
@@ -160,7 +165,15 @@ def _validate_payload(
     )
 
 
-def correction_prompt(error: str) -> str:
+def correction_prompt(error: str, *, strict: bool = False) -> str:
+    if strict:
+        return (
+            "Your reply still could not be parsed as a tool call: "
+            f"{error}. This is your final attempt. Reply with ONLY this exact shape and nothing else:\n"
+            '```tool_call\n{"name": "<one of the available tool names>", "arguments": {}}\n```\n'
+            "No prose before or after. If you do not need a tool, reply with plain text and no "
+            "code fence labelled tool_call."
+        )
     return (
         "Your previous reply attempted a tool call but could not be parsed: "
         f"{error}. Reply again with ONLY a single fenced ```tool_call block containing "

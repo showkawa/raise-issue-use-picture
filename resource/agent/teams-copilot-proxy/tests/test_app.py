@@ -19,6 +19,7 @@ from teams_copilot_proxy.cli import (
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.session_store import PersistentSessionStore
 from teams_copilot_proxy.substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from teams_copilot_proxy.tool_protocol import TOOL_FAILURE_SENTINEL
 
 
 class FakeCopilotClient:
@@ -652,6 +653,75 @@ def test_tool_protocol_rejects_unknown_tool_then_falls_back_to_text() -> None:
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["message"]["content"] == "I cannot do that with the available tools."
+
+
+MALFORMED_TOOL_CALL = '```tool_call\n{"name": "read_file", "arguments": {broken\n```'
+
+
+def test_chat_completion_returns_failure_sentinel_when_all_corrections_fail() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL, MALFORMED_TOOL_CALL])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == TOOL_FAILURE_SENTINEL
+    assert len(fake.calls) == 2
+
+
+def test_streaming_returns_failure_sentinel_when_all_corrections_fail() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL, MALFORMED_TOOL_CALL])
+    client = build_client(fake)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert TOOL_FAILURE_SENTINEL in payload
+    assert '"finish_reason": "stop"' in payload
+    assert len(fake.calls) == 2
+
+
+def test_correction_count_is_configurable_and_final_attempt_is_strict() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL] * 3)
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_TOOL_CORRECTION_RETRIES=2)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == TOOL_FAILURE_SENTINEL
+    assert len(fake.calls) == 3
+    assert "final attempt" in fake.calls[2][0]
+    assert "final attempt" not in fake.calls[1][0]
 
 
 def test_responses_requires_final_user_message() -> None:

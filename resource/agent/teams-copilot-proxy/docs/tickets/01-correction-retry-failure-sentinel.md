@@ -11,11 +11,11 @@ of an identical request.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A new `M365_*`-style setting controls the correction attempt count; default preserves today's single-correction behaviour.
-- [ ] The final correction attempt uses a stricter, minimal-schema reminder prompt.
-- [ ] After attempts are exhausted, the response content is the documented Failure Sentinel string with `finish_reason: "stop"`; the raw model text is not passed through.
-- [ ] Non-stream and stream (tools present) paths return the sentinel consistently.
-- [ ] A clean plain-text reply (no tool_call fence) returns `finish_reason: "stop"` without any correction attempt.
-- [ ] Tests at the HTTP seam (fake client scripted to return malformed calls for N+1 turns) assert attempt count == configured count and the sentinel result, for both non-stream and stream.
+- [x] A new `M365_*`-style setting controls the correction attempt count; default preserves today's single-correction behaviour. (`M365_TOOL_CORRECTION_RETRIES`, default 1)
+- [x] The final correction attempt uses a stricter, minimal-schema reminder prompt. (`correction_prompt(strict=True)` when retries > 1)
+- [x] After attempts are exhausted, the response content is the documented Failure Sentinel string with `finish_reason: "stop"`; the raw model text is not passed through. (`TOOL_FAILURE_SENTINEL`)
+- [x] Non-stream and stream (tools present) paths return the sentinel consistently.
+- [x] A clean plain-text reply (no tool_call fence) returns `finish_reason: "stop"` without any correction attempt.
+- [x] Tests at the HTTP seam (fake client scripted to return malformed calls for N+1 turns) assert attempt count == configured count and the sentinel result, for both non-stream and stream.
