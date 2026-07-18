@@ -1,6 +1,7 @@
 import type { AgentConfig, PermissionMode } from '../types.js';
 import type { ToolCall } from './protocol.js';
 import type { ToolRisk } from './tools/types.js';
+import { classifyCommand } from './command-classify.js';
 
 export interface PermissionDecision {
   allowed: boolean;
@@ -43,11 +44,15 @@ export class PermissionGate {
       ? this.config.denyCommands.find((needle) => commandText.includes(needle))
       : undefined;
 
-    if (denyHit || risk === 'destructive') {
-      const reason = denyHit
-        ? `命令命中 denyCommands 规则 "${denyHit}"`
-        : '该操作被标记为 destructive';
-      return this.askUser(call, reason);
+    if (denyHit) {
+      return this.askUser(call, `命令命中 denyCommands 规则 "${denyHit}"`);
+    }
+    if (risk === 'destructive') {
+      return this.askUser(call, '该操作被标记为 destructive');
+    }
+    const classified = commandText ? classifyCommand(commandText) : { destructive: false };
+    if (classified.destructive) {
+      return this.askUser(call, `命令被判定为破坏性操作：${classified.reason}`);
     }
 
     switch (this.mode) {

@@ -124,6 +124,13 @@ describe('run_command', () => {
     expect(result.exitCode).toBe(3);
   });
 
+  it('rejects interactive commands without spawning them', async () => {
+    const result = await runCommandTool.run({ command: 'vim notes.txt' }, ctx);
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain('拒绝执行交互式命令');
+    expect(result.exitCode).toBeUndefined();
+  });
+
   it('kills commands on timeout', async () => {
     const sleep = process.platform === 'win32' ? 'Start-Sleep -Seconds 30' : 'sleep 30';
     const result = await runCommandTool.run({ command: sleep, timeoutMs: 1500 }, ctx);

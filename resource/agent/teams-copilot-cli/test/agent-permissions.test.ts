@@ -42,6 +42,16 @@ describe('PermissionGate', () => {
     expect(decision.allowed).toBe(false);
   });
 
+  it('token-level classifier flags destructive commands outside denyCommands, even in yolo', async () => {
+    const gate = new PermissionGate(baseConfig);
+    const decision = await gate.check(
+      call('run_command', { command: 'echo ok && Remove-Item -Recurse dist' }),
+      'exec',
+    );
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain('破坏性');
+  });
+
   it('asks the confirm handler and honors approval', async () => {
     let asked = '';
     const gate = new PermissionGate(baseConfig, {
