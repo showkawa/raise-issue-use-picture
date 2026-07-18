@@ -176,6 +176,13 @@ describe('grep / glob / walkFiles', () => {
     expect(byPath.output).toContain('src/app.ts');
   });
 
+  it('grep skips sensitive files and marks them instead of surfacing secrets', async () => {
+    writeFileSync(join(root, '.env'), 'API_KEY=needle-secret-value\n');
+    const result = await grepTool.run({ pattern: 'needle' }, ctx);
+    expect(result.output).not.toContain('needle-secret-value');
+    expect(result.output).toContain('敏感文件');
+  });
+
   it('glob matches patterns', async () => {
     const result = await globTool.run({ pattern: 'src/**/*.ts' }, ctx);
     expect(result.output).toContain('src/app.ts');
