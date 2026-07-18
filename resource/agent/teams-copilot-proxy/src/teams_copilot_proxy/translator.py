@@ -8,7 +8,7 @@ from .models import (
     OpenAIChatRequest,
     TranslatedRequest,
 )
-from .tool_protocol import render_tool_instructions
+from .tool_protocol import render_tool_instructions, tool_reminder
 
 
 def flatten_content(content: str | list[ContentPart] | None) -> str:
@@ -42,28 +42,64 @@ def _render_openai_message(message) -> str:
     return f"{message.role.capitalize()}: {text}"
 
 
+_TRUNCATION_MARKER = "[earlier conversation truncated]"
+
+
+def _is_tool_call_line(line: str) -> bool:
+    return line.startswith("Assistant:") and "[tool call]" in line
+
+
+def _is_tool_result_line(line: str) -> bool:
+    return line.startswith("Tool result (")
+
+
+def _group_turn_units(transcript_lines: list[str]) -> list[list[str]]:
+    """Group each transcript line into a turn unit, binding a tool call to the
+    tool result(s) that immediately follow it so they are never split apart."""
+    units: list[list[str]] = []
+    index = 0
+    total = len(transcript_lines)
+    while index < total:
+        line = transcript_lines[index]
+        if _is_tool_call_line(line):
+            unit = [line]
+            following = index + 1
+            while following < total and _is_tool_result_line(transcript_lines[following]):
+                unit.append(transcript_lines[following])
+                following += 1
+            units.append(unit)
+            index = following
+        else:
+            units.append([line])
+            index += 1
+    return units
+
+
 def _truncate_transcript(transcript_lines: list[str], budget: int) -> list[str]:
     if budget <= 0:
         return transcript_lines
     total = sum(len(line) + 1 for line in transcript_lines)
     if total <= budget:
         return transcript_lines
-    kept: list[str] = []
+
+    effective = budget - (len(_TRUNCATION_MARKER) + 1)
+    kept_units: list[list[str]] = []
     used = 0
-    for line in reversed(transcript_lines):
-        used += len(line) + 1
-        if used > budget:
+    for unit in reversed(_group_turn_units(transcript_lines)):
+        used += sum(len(line) + 1 for line in unit)
+        if used > effective:
             break
-        kept.append(line)
-    kept.reverse()
-    if len(kept) < len(transcript_lines):
-        kept.insert(0, "[earlier conversation truncated]")
+        kept_units.append(unit)
+    kept_units.reverse()
+    kept = [line for unit in kept_units for line in unit]
+    kept.insert(0, _TRUNCATION_MARKER)
     return kept
 
 
 def translate_openai_request(
     request: OpenAIChatRequest,
     max_transcript_chars: int = 0,
+    suppress_system_prompt_with_tools: bool = False,
 ) -> TranslatedRequest:
     system_lines: list[str] = []
     transcript_lines: list[str] = []
@@ -93,7 +129,13 @@ def translate_openai_request(
 
     additional_context: list[str] = []
     system_text = _join_lines(system_lines)
-    if system_text:
+    # Client system prompts (e.g. OpenCode's) are written for native function
+    # calling and push the browser-channel model into "I cannot access your
+    # files" prose instead of emitting a tool_call. When tools are present we
+    # drop that framing so the tool protocol is the only authoritative system
+    # instruction the model sees.
+    suppress_system = bool(request.tools) and suppress_system_prompt_with_tools
+    if system_text and not suppress_system:
         additional_context.append(f"System instructions:\n{system_text}")
     if request.tools:
         additional_context.append(render_tool_instructions(request.tools))
@@ -101,6 +143,8 @@ def translate_openai_request(
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
+    if request.tools:
+        prompt = f"{prompt}{tool_reminder(request.tools)}"
     return TranslatedRequest(prompt=prompt, additional_context=additional_context)
 
 

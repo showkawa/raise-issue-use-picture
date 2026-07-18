@@ -4,6 +4,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -18,7 +19,12 @@ from teams_copilot_proxy.cli import (
 )
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.session_store import PersistentSessionStore
-from teams_copilot_proxy.substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from teams_copilot_proxy.substrate_client import (
+    _OPTIONS_SETS,
+    SubstrateCopilotClient,
+    SubstrateCopilotError,
+)
+from teams_copilot_proxy.tool_protocol import TOOL_FAILURE_SENTINEL
 
 
 class FakeCopilotClient:
@@ -652,6 +658,333 @@ def test_tool_protocol_rejects_unknown_tool_then_falls_back_to_text() -> None:
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "stop"
     assert choice["message"]["content"] == "I cannot do that with the available tools."
+
+
+MALFORMED_TOOL_CALL = '```tool_call\n{"name": "read_file", "arguments": {broken\n```'
+
+
+def test_chat_completion_returns_failure_sentinel_when_all_corrections_fail() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL, MALFORMED_TOOL_CALL])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == TOOL_FAILURE_SENTINEL
+    assert len(fake.calls) == 2
+
+
+def test_streaming_returns_failure_sentinel_when_all_corrections_fail() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL, MALFORMED_TOOL_CALL])
+    client = build_client(fake)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert TOOL_FAILURE_SENTINEL in payload
+    assert '"finish_reason": "stop"' in payload
+    assert len(fake.calls) == 2
+
+
+def test_correction_count_is_configurable_and_final_attempt_is_strict() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL] * 3)
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_TOOL_CORRECTION_RETRIES=2)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == TOOL_FAILURE_SENTINEL
+    assert len(fake.calls) == 3
+    assert "final attempt" in fake.calls[2][0]
+    assert "final attempt" not in fake.calls[1][0]
+
+
+def test_tool_reminder_is_appended_after_prompt_when_tools_present() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "看下当前项目下的README.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt = fake.calls[0][0]
+    assert prompt.startswith("看下当前项目下的README.md")
+    assert "tool-calling reminder" in prompt
+    assert "read_file" in prompt
+    assert prompt.rstrip().endswith(
+        "Reply with plain text only when the task is fully complete and no tool is needed."
+    )
+
+
+def test_system_prompt_is_suppressed_when_tools_present() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [
+                {"role": "system", "content": "You are opencode. You cannot access files."},
+                {"role": "user", "content": "看下当前项目下的README.md"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert not any(part.startswith("System instructions:") for part in context)
+    assert not any("cannot access files" in part for part in context)
+    assert any("Tool calling protocol" in part for part in context)
+
+
+def test_system_prompt_kept_when_no_tools() -> None:
+    fake = ToolCallingCopilotClient(["plain answer"])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": "hi"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert any(part.startswith("System instructions:") for part in context)
+
+
+def test_system_prompt_kept_with_tools_when_suppression_disabled() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
+    )
+    settings = Settings(
+        M365_ACCESS_TOKEN="fake-token",
+        M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=False,
+    )
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [
+                {"role": "system", "content": "You are opencode."},
+                {"role": "user", "content": "read a.py"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    context = fake.calls[0][1]
+    assert any(part.startswith("System instructions:") for part in context)
+
+
+def test_code_interpreter_option_sets_are_disabled() -> None:
+    assert not any("code_interpreter" in option for option in _OPTIONS_SETS)
+
+
+def test_no_tool_reminder_when_no_tools() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt = fake.calls[0][0]
+    assert "tool-calling reminder" not in prompt
+    assert prompt == "hello"
+
+
+def _transcript_sent(fake: FakeCopilotClient) -> str:
+    for _prompt, context in fake.calls:
+        for part in context:
+            if part.startswith("Prior conversation transcript:"):
+                return part[len("Prior conversation transcript:\n"):]
+    return ""
+
+
+def _history_with_tool_turn() -> list[dict]:
+    messages: list[dict] = []
+    for _ in range(6):
+        messages.append({"role": "user", "content": "F" * 100})
+        messages.append({"role": "assistant", "content": "A" * 100})
+    messages.append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "a.py"}'},
+                }
+            ],
+        }
+    )
+    messages.append({"role": "tool", "tool_call_id": "call_1", "content": "R" * 200})
+    messages.append({"role": "user", "content": "continue"})
+    return messages
+
+
+def _post_with_budget(budget: int) -> FakeCopilotClient:
+    fake = FakeCopilotClient()
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_MAX_TRANSCRIPT_CHARS=budget)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": _history_with_tool_turn()},
+    )
+    assert response.status_code == 200
+    return fake
+
+
+def test_turn_aware_truncation_never_orphans_a_tool_result() -> None:
+    transcript = _transcript_sent(_post_with_budget(250))
+
+    if "Tool result (call_1)" in transcript:
+        assert "[tool call]" in transcript
+
+
+def test_turn_aware_truncation_keeps_tool_call_with_result_within_budget() -> None:
+    budget = 400
+    transcript = _transcript_sent(_post_with_budget(budget))
+
+    assert "[tool call]" in transcript
+    assert "Tool result (call_1)" in transcript
+    assert "FFFFFFFFFF" not in transcript
+    assert len(transcript) <= budget
+
+
+SECRET_BEARER = "Bearer AbC123dEf456GhI789jklMNO"
+SECRET_OPENAI_KEY = "sk-ABCDEFGHIJKLMNOP1234567890"
+SECRET_ENV_LINE = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIexample123"
+
+
+def test_outbound_redaction_scrubs_secrets_in_prompt() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": f"token {SECRET_BEARER} key {SECRET_OPENAI_KEY}"}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    prompt, _context = fake.calls[0]
+    assert "AbC123dEf456GhI789jklMNO" not in prompt
+    assert SECRET_OPENAI_KEY not in prompt
+    assert "[REDACTED]" in prompt
+
+
+def test_outbound_redaction_scrubs_secrets_in_transcript() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": "set up creds"},
+                {"role": "assistant", "content": SECRET_ENV_LINE},
+                {"role": "user", "content": "continue"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    transcript = _transcript_sent(fake)
+    assert "wJalrXUtnFEMIexample123" not in transcript
+    assert "AWS_SECRET_ACCESS_KEY=[REDACTED]" in transcript
+
+
+def test_outbound_redaction_can_be_disabled() -> None:
+    fake = FakeCopilotClient()
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_REDACT_OUTBOUND=False)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": f"key {SECRET_OPENAI_KEY}"}]},
+    )
+
+    assert response.status_code == 200
+    prompt, _context = fake.calls[0]
+    assert SECRET_OPENAI_KEY in prompt
+
+
+def test_outbound_redaction_does_not_change_response() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": f"key {SECRET_OPENAI_KEY}"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
+
+
+def test_example_opencode_config_parses_and_declares_tool_call() -> None:
+    config_path = Path(__file__).resolve().parent.parent / "examples" / "opencode.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    model = config["provider"]["teams-copilot"]["models"]["m365-copilot"]
+    assert model["tool_call"] is True
+    options = config["provider"]["teams-copilot"]["options"]
+    assert options["baseURL"] == "http://127.0.0.1:8000/v1"
 
 
 def test_responses_requires_final_user_message() -> None:

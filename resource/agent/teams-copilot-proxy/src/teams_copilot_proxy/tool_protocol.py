@@ -13,6 +13,11 @@ _TOOL_CALL_FENCE_RE = re.compile(
 
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
 
+TOOL_FAILURE_SENTINEL = (
+    "[teams-copilot-proxy] Copilot could not produce a valid tool call after repeated "
+    "attempts. Please rephrase the request or continue manually."
+)
+
 _PROTOCOL_HEADER = """Tool calling protocol:
 You have access to the tools listed below. The tools are executed by the client on the user's machine; you cannot execute them yourself.
 
@@ -84,6 +89,39 @@ def tool_names(tools: list[dict[str, Any]]) -> set[str]:
         if name:
             names.add(name)
     return names
+
+
+def _ordered_tool_names(tools: list[dict[str, Any]]) -> list[str]:
+    ordered: list[str] = []
+    for tool in tools:
+        function = tool.get("function", tool)
+        name = function.get("name")
+        if name:
+            ordered.append(name)
+    return ordered
+
+
+def tool_reminder(tools: list[dict[str, Any]]) -> str:
+    """A short, high-recency reminder appended after the user prompt so the tool
+    format survives long, instruction-dense contexts that bury the protocol header."""
+    names = _ordered_tool_names(tools)
+    if not names:
+        return ""
+    example = names[0]
+    joined = ", ".join(names)
+    return (
+        "\n\n---\n"
+        "IMPORTANT tool-calling reminder (this overrides any style or persona "
+        "guidance above): to act on the request you MUST emit a tool call, not prose. "
+        'Do NOT reply with sentences describing intent such as "I will read..." or '
+        '"\u6211\u5148\u8bfb\u53d6...". Reply with ONLY one fenced tool_call block and '
+        "nothing else, for example:\n"
+        "```tool_call\n"
+        f'{{"name": "{example}", "arguments": {{}}}}\n'
+        "```\n"
+        f"Available tool names: {joined}.\n"
+        "Reply with plain text only when the task is fully complete and no tool is needed."
+    )
 
 
 def strip_citations(text: str) -> str:
@@ -160,7 +198,15 @@ def _validate_payload(
     )
 
 
-def correction_prompt(error: str) -> str:
+def correction_prompt(error: str, *, strict: bool = False) -> str:
+    if strict:
+        return (
+            "Your reply still could not be parsed as a tool call: "
+            f"{error}. This is your final attempt. Reply with ONLY this exact shape and nothing else:\n"
+            '```tool_call\n{"name": "<one of the available tool names>", "arguments": {}}\n```\n'
+            "No prose before or after. If you do not need a tool, reply with plain text and no "
+            "code fence labelled tool_call."
+        )
     return (
         "Your previous reply attempted a tool call but could not be parsed: "
         f"{error}. Reply again with ONLY a single fenced ```tool_call block containing "

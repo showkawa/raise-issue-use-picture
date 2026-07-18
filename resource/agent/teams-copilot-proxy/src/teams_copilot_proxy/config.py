@@ -16,3 +16,8 @@ class Settings(BaseSettings):
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")
     max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
     proxy: str = Field(default="", alias="M365_PROXY")
+    tool_correction_retries: int = Field(default=1, alias="M365_TOOL_CORRECTION_RETRIES")
+    redact_outbound: bool = Field(default=True, alias="M365_REDACT_OUTBOUND")
+    suppress_system_prompt_with_tools: bool = Field(
+        default=True, alias="M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS"
+    )

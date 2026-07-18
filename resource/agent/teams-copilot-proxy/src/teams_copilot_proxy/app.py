@@ -12,8 +12,10 @@ from .config import Settings
 from .session_store import PersistentSession, PersistentSessionStore
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
-from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
+from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest, TranslatedRequest
+from .redaction import redact_outbound
 from .tool_protocol import (
+    TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
     correction_prompt,
     parse_model_output,
@@ -77,7 +79,12 @@ def create_app(
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
         try:
-            translated = translate_openai_request(request, settings.max_transcript_chars)
+            translated = translate_openai_request(
+                request,
+                settings.max_transcript_chars,
+                settings.suppress_system_prompt_with_tools,
+            )
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:
                 if request.tools:
@@ -89,6 +96,7 @@ def create_app(
                             translated.additional_context,
                             request.tools,
                             session,
+                            settings.tool_correction_retries,
                         ),
                         media_type="text/event-stream",
                     )
@@ -109,6 +117,7 @@ def create_app(
                     translated.additional_context,
                     request.tools,
                     session,
+                    settings.tool_correction_retries,
                 )
                 return JSONResponse(_tool_outcome_completion(settings.model_alias, outcome))
             text = await client.chat(translated.prompt, translated.additional_context, session)
@@ -141,6 +150,7 @@ def create_app(
         try:
             request = OpenAIResponsesRequest.model_validate(body)
             translated = translate_responses_request(request)
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -179,6 +189,7 @@ def create_app(
     ):
         try:
             translated = translate_anthropic_request(request)
+            translated = _redact_translated(translated, settings)
             session = _persistent_session(app, raw_request, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -208,6 +219,15 @@ def create_app(
     return app
 
 
+def _redact_translated(translated: TranslatedRequest, settings: Settings) -> TranslatedRequest:
+    if not settings.redact_outbound:
+        return translated
+    prompt, additional_context = redact_outbound(
+        translated.prompt, translated.additional_context
+    )
+    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
+
+
 def _persistent_session(
     app: FastAPI,
     raw_request: Request,
@@ -228,21 +248,32 @@ async def _chat_resolving_tools(
     additional_context: list[str],
     tools: list[dict],
     session: PersistentSession | None = None,
+    max_corrections: int = 1,
 ) -> ToolParseOutcome:
     allowed = tool_names(tools)
     text = await client.chat(prompt, additional_context, session)
     outcome = parse_model_output(text, allowed)
     if outcome.error is None:
         return outcome
-    retry_context = additional_context + [
-        f"Original request:\n{prompt}",
-        f"Your previous reply:\n{text}",
-    ]
-    retry_text = await client.chat(correction_prompt(outcome.error), retry_context, session)
-    retry_outcome = parse_model_output(retry_text, allowed)
-    if retry_outcome.error is None:
-        return retry_outcome
-    return ToolParseOutcome(text=outcome.text)
+
+    last_text = text
+    last_error = outcome.error
+    attempts = max(max_corrections, 0)
+    for attempt in range(attempts):
+        strict = attempts > 1 and attempt == attempts - 1
+        retry_context = additional_context + [
+            f"Original request:\n{prompt}",
+            f"Your previous reply:\n{last_text}",
+        ]
+        retry_text = await client.chat(
+            correction_prompt(last_error, strict=strict), retry_context, session
+        )
+        retry_outcome = parse_model_output(retry_text, allowed)
+        if retry_outcome.error is None:
+            return retry_outcome
+        last_text = retry_text
+        last_error = retry_outcome.error
+    return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL)
 
 
 def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dict:
@@ -278,6 +309,7 @@ async def _openai_stream_with_tools(
     additional_context: list[str],
     tools: list[dict],
     session: PersistentSession | None = None,
+    max_corrections: int = 1,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -294,7 +326,9 @@ async def _openai_stream_with_tools(
 
     yield chunk({"role": "assistant"})
     try:
-        outcome = await _chat_resolving_tools(client, prompt, additional_context, tools, session)
+        outcome = await _chat_resolving_tools(
+            client, prompt, additional_context, tools, session, max_corrections
+        )
     except SubstrateCopilotError as exc:
         yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
         yield "data: [DONE]\n\n"
