@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { markTaskDone, parseTasks } from '../src/agent/tasks-file.js';
+import { findMalformedTaskLines, markTaskDone, parseTasks } from '../src/agent/tasks-file.js';
 
 const sample = [
   '# 项目任务',
@@ -24,6 +24,26 @@ describe('parseTasks', () => {
 
   it('returns empty for files without checkboxes', () => {
     expect(parseTasks('# nothing here')).toEqual([]);
+  });
+});
+
+describe('findMalformedTaskLines', () => {
+  it('does not flag valid tasks or ordinary prose', () => {
+    expect(findMalformedTaskLines(sample)).toEqual([]);
+  });
+
+  it('flags checkbox-like lines that would be silently dropped', () => {
+    const content = [
+      '- [ ] T1: 正常任务',
+      '- [] T2: 缺少空格',
+      '-[ ] T3: 破折号后无空格',
+      '* [ ] T4: 错误的项目符号',
+      '- [ ]T5: 括号后无空格',
+      '普通文本 - [ ] 不是任务',
+    ].join('\n');
+    const malformed = findMalformedTaskLines(content);
+    expect(malformed.map((item) => item.line)).toEqual([1, 2, 3, 4]);
+    expect(malformed[0].text).toBe('- [] T2: 缺少空格');
   });
 });
 

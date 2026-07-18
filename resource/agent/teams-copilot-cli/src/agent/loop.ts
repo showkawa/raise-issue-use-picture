@@ -5,7 +5,10 @@ import type { ToolCall } from './protocol.js';
 import {
   buildCorrectionMessage,
   formatToolResults,
+  parseHandshake,
   parseReply,
+  parseTurnAck,
+  tagTurn,
   type ProtocolToolResult,
 } from './protocol.js';
 import type { ToolRegistry } from './tools/registry.js';
@@ -74,8 +77,14 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
   let lastSendAt = 0;
 
   const state: LoopSession = { session: await provider.createSession(), turnsUsed: 0, charsUsed: 0 };
+  let turnSeq = 0;
 
   async function send(message: string, stream = false): Promise<ChatTurnResult> {
+    // Tag every outbound message with a monotonic [turn N] and check the reply echoes
+    // it back, so request/response drift on the copilot-web channel is detectable (ADR-0008).
+    turnSeq += 1;
+    const turn = turnSeq;
+    const tagged = tagTurn(turn, message);
     // Add up to 30% random jitter to the send interval so the cadence doesn't look
     // like a fixed-rate bot to the Copilot tenant's abuse detection (ADR-0007).
     const interval = config.minSendIntervalMs;
@@ -85,10 +94,14 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
     let lastError: unknown;
     for (let attempt = 0; attempt <= SEND_RETRIES; attempt++) {
       try {
-        const result = await sendChunked(state.session, message, capabilities.maxMessageChars, stream ? ui?.streamChunk : undefined);
+        const result = await sendChunked(state.session, tagged, capabilities.maxMessageChars, stream ? ui?.streamChunk : undefined);
         lastSendAt = Date.now();
         state.turnsUsed += 1;
-        state.charsUsed += message.length + result.text.length;
+        state.charsUsed += tagged.length + result.text.length;
+        const ack = parseTurnAck(result.text);
+        if (ack !== null && ack !== turn) {
+          ui?.onStatus?.(`检测到请求/回复错位：期望 [ack turn ${turn}]，收到 [ack turn ${ack}]`);
+        }
         return result;
       } catch (error) {
         lastError = error;
@@ -101,7 +114,14 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
 
   async function injectProtocol(): Promise<void> {
     ui?.onStatus?.('注入协议提示词...');
-    await send(buildProtocolPrompt(workspace, registry.list()));
+    const tools = registry.list();
+    const reply = await send(buildProtocolPrompt(workspace, tools));
+    // Round-2 self-check: verify the model echoed a well-formed handshake block. Soft
+    // (status only) — the first real request will surface any deeper protocol issues.
+    const handshake = parseHandshake(reply.text, tools.length);
+    if (!handshake.valid) {
+      ui?.onStatus?.(`协议握手自检未通过：${handshake.problems.join('；')}`);
+    }
   }
 
   const charBudget = config.sessionCharBudget ?? DEFAULT_SESSION_CHAR_BUDGET;
@@ -130,6 +150,7 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
     state.session = await provider.createSession();
     state.turnsUsed = 0;
     state.charsUsed = 0;
+    turnSeq = 0;
     await injectProtocol();
     return [
       '会话已重建。原始任务：',

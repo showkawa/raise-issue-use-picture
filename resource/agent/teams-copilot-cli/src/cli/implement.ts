@@ -8,7 +8,7 @@ import { PermissionGate } from '../agent/permissions.js';
 import { createDefaultRegistry } from '../agent/tools/registry.js';
 import { acquireLock } from '../agent/lock.js';
 import { createAuditLogger } from '../agent/audit.js';
-import { markTaskDone, parseTasks, type TaskItem } from '../agent/tasks-file.js';
+import { findMalformedTaskLines, markTaskDone, parseTasks, type TaskItem } from '../agent/tasks-file.js';
 import { buildWorkspaceInfo } from '../context/workspace.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
@@ -70,6 +70,13 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
   }
 
   let content = readFileSync(tasksPath, 'utf8');
+  const malformed = findMalformedTaskLines(content);
+  if (malformed.length > 0) {
+    process.stderr.write(
+      `[tcc] ${tasksPath} 有 ${malformed.length} 行疑似任务但格式不合规，已跳过（未静默漏掉，请修正为 "- [ ] T1: ..."）：\n`
+      + malformed.map((item) => `  L${item.line + 1}: ${item.text}`).join('\n') + '\n',
+    );
+  }
   const all = parseTasks(content);
   if (all.length === 0) {
     throw new Error(`No checkbox tasks found in ${tasksPath}. Expected lines like "- [ ] T1: ..."`);
@@ -136,7 +143,9 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
         const message = error instanceof Error ? error.message : String(error);
         process.stderr.write(`任务 ${task.id} 失败：${message}\n`);
         if (!opts.continueOnFailure) {
-          process.stderr.write('已停止（checkbox 保持未勾选；改动保留在工作树中，请人工检查）。使用 --continue-on-failure 可跳过失败任务继续。\n');
+          process.stderr.write('已停止（checkbox 保持未勾选；半成品改动保留在工作树中、未 commit、未 stash）。\n');
+          process.stderr.write('请人工检查：`git status` 查看改动，`git diff` 查看内容，`git checkout -p` 可选择性回退。\n');
+          process.stderr.write('确认无误后可加 --continue-on-failure 跳过失败任务继续。\n');
           break;
         }
       }

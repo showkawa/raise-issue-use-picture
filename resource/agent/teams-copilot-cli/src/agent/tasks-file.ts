@@ -9,6 +9,31 @@ export interface TaskItem {
 
 const CHECKBOX_LINE = /^(\s*)- \[( |x|X)\] (.+)$/;
 const TASK_ID = /^([A-Za-z]+\d+)\s*[:：]\s*(.*)$/;
+// Lines that begin like a checkbox bullet but don't parse as a valid task
+// (wrong bullet, missing space, empty/multi-char brackets, empty description).
+const CHECKBOX_LIKE = /^\s*[-*+]\s*\[[^\]]*\]/;
+
+export interface MalformedTaskLine {
+  /** 0-based line index. */
+  line: number;
+  text: string;
+}
+
+/**
+ * Finds lines that look like an intended task checkbox but are not parseable, so the
+ * caller can surface them instead of silently dropping tasks (ticket 07 / ADR-0009).
+ */
+export function findMalformedTaskLines(content: string): MalformedTaskLine[] {
+  const malformed: MalformedTaskLine[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const [index, line] of lines.entries()) {
+    if (CHECKBOX_LINE.test(line)) continue;
+    if (CHECKBOX_LIKE.test(line)) {
+      malformed.push({ line: index, text: line.trim() });
+    }
+  }
+  return malformed;
+}
 
 export function parseTasks(content: string): TaskItem[] {
   const tasks: TaskItem[] = [];

@@ -92,6 +92,22 @@ describe('runAgent (MockProvider integration)', () => {
     expect(injections.length).toBe(2);
   });
 
+  it('tags outbound messages with [turn N] and detects ack misalignment (ADR-0008)', async () => {
+    writeFileSync(join(root, 'app.txt'), 'v=1\n');
+    const statuses: string[] = [];
+    const provider = new MockProvider([], {
+      respond: (message) => {
+        if (message.includes('工具清单')) return '[ack turn 1]\n<<<READY tools="7" protocol="ok">>>';
+        if (message.includes('## 任务')) return `[ack turn 99]\n${toolBlock('read_file', { path: 'app.txt' })}`;
+        return '<<<DONE\n完成\n>>>';
+      },
+    });
+    await runAgent('t', { ...deps(provider), ui: { onStatus: (message) => statuses.push(message) } });
+    expect(provider.sent[0].startsWith('[turn 1]')).toBe(true);
+    expect(provider.sent[1].startsWith('[turn 2]')).toBe(true);
+    expect(statuses.some((status) => status.includes('错位'))).toBe(true);
+  });
+
   it('denies gated calls and reports the denial to the model', async () => {
     const provider = new MockProvider([
       'OK',
