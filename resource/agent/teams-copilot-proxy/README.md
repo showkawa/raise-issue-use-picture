@@ -60,25 +60,57 @@ Use these settings for any OpenAI-compatible client:
 
 ### OpenCode
 
+Recommended: drop a project-level `opencode.json` in your repo root. It declares the proxy as a custom provider with `tool_call: true`, which is **required** — without it OpenCode will not send tool definitions and the agent loop cannot run:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "teams-copilot": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Teams Copilot Proxy",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "unused"
+      },
+      "models": {
+        "m365-copilot": {
+          "name": "M365 Copilot",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Then run `opencode` in that project and pick **M365 Copilot** under the **Teams Copilot Proxy** provider. The same file lives at [examples/opencode.json](examples/opencode.json).
+
+`limit.context` (`128000`) is a placeholder; Copilot's real input limit depends on your tenant and should be measured against a live session, then backfilled here.
+
+For a quick non-agentic chat setup instead, point OpenCode's built-in OpenAI provider at the proxy:
+
 ```bat
 set OPENAI_BASE_URL=http://127.0.0.1:8000
 set OPENAI_API_KEY=dummy
 opencode
 ```
 
-Select **OpenAI API** as the provider, then use:
-
-```text
-m365-copilot
-```
-
-For persistent Copilot-side conversation memory:
+For persistent Copilot-side conversation memory, use the model:
 
 ```text
 m365-copilot:persist
 ```
 
 Tool calling: when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
+
+System prompt on tool turns: OpenCode's built-in system prompt is written for native function calling and makes the Copilot browser channel refuse in prose ("I can't access your local files") instead of emitting a tool call. So when `tools` are present the proxy drops the client system prompt and lets the tool protocol be the only authoritative instruction (`M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS`, default on). To restore forwarding the full system prompt, set `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=false`.
 
 For a ready-to-use project-level config and the full loop mapping, see [examples/opencode.json](examples/opencode.json) and [docs/opencode-integration.md](docs/opencode-integration.md).
 
@@ -250,6 +282,7 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_MAX_TRANSCRIPT_CHARS` | `200000` | Optional. Safety-net character budget for the flattened prior-conversation transcript; whole turn units are dropped oldest-first and a tool call is never split from its result. OpenCode is the primary context bounder. |
 | `M365_TOOL_CORRECTION_RETRIES` | `1` | Optional. Number of correction attempts when Copilot returns a malformed tool call. The final attempt uses a stricter reminder; after all attempts fail the proxy returns the Failure Sentinel with `finish_reason: stop`. |
 | `M365_REDACT_OUTBOUND` | `true` | Optional. When on, scrubs secret-like strings (tokens, API keys, private keys, `KEY=value` env secrets) from everything sent upstream to Copilot, replacing them with `[REDACTED]`. Only affects outbound content, not the client response. |
+| `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` | `true` | Optional. When on, drops the client (e.g. OpenCode) system prompt on requests that carry `tools`, so the Copilot browser channel emits a tool call instead of refusing in prose. Set to `false` to forward the full system prompt on tool turns. Requests without tools are unaffected. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 
 ## Limitations
