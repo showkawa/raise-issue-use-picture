@@ -5,3 +5,5 @@ debug-*.mjs
 dist/
 test-results/
 playwright-report/
+.teams-copilot/
+.scratch/

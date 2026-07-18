@@ -9,6 +9,7 @@ import {
   type ProtocolToolResult,
 } from './protocol.js';
 import type { ToolRegistry } from './tools/registry.js';
+import type { AuditLogger } from './audit.js';
 import { buildProtocolPrompt, buildTaskMessage, type WorkspaceInfo } from './system-prompt.js';
 
 const MAX_CORRECTIONS = 2;
@@ -32,6 +33,7 @@ export interface AgentDeps {
   workspace: WorkspaceInfo;
   config: AgentConfig;
   ui?: AgentUi;
+  audit?: AuditLogger;
 }
 
 export interface AgentRunResult {
@@ -65,7 +67,7 @@ interface LoopSession {
 }
 
 export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunResult> {
-  const { provider, registry, gate, workspace, config, ui } = deps;
+  const { provider, registry, gate, workspace, config, ui, audit } = deps;
   const capabilities = provider.capabilities();
   const schemas = registry.schemas();
   const actions: string[] = [];
@@ -200,6 +202,14 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
       }
       results.push(result);
       actions.push(describeAction(call, result));
+      audit?.({
+        tool: call.name,
+        target: describeTarget(call),
+        allowed: decision.allowed,
+        ok: result.ok,
+        exitCode: result.exitCode,
+        reason: decision.allowed ? undefined : decision.reason,
+      });
       ui?.onToolResult?.(call, result);
     }
 
@@ -249,13 +259,16 @@ export async function sendChunked(
   return last!;
 }
 
-function describeAction(call: ToolCall, result: ProtocolToolResult): string {
-  const target = typeof call.args.path === 'string' ? call.args.path
+function describeTarget(call: ToolCall): string {
+  return typeof call.args.path === 'string' ? call.args.path
     : typeof call.args.command === 'string' ? call.args.command.slice(0, 80)
     : typeof call.args.pattern === 'string' ? call.args.pattern
     : typeof call.args.subcommand === 'string' ? call.args.subcommand
     : '';
-  return `${call.name}(${target}) → ${result.ok ? 'ok' : `失败: ${result.output.slice(0, 120)}`}`;
+}
+
+function describeAction(call: ToolCall, result: ProtocolToolResult): string {
+  return `${call.name}(${describeTarget(call)}) → ${result.ok ? 'ok' : `失败: ${result.output.slice(0, 120)}`}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

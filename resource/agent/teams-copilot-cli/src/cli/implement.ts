@@ -6,6 +6,8 @@ import { createProvider } from '../provider/factory.js';
 import { runAgent } from '../agent/loop.js';
 import { PermissionGate } from '../agent/permissions.js';
 import { createDefaultRegistry } from '../agent/tools/registry.js';
+import { acquireLock } from '../agent/lock.js';
+import { createAuditLogger } from '../agent/audit.js';
 import { markTaskDone, parseTasks, type TaskItem } from '../agent/tasks-file.js';
 import { buildWorkspaceInfo } from '../context/workspace.js';
 import type { CommandOpts } from './ask.js';
@@ -97,6 +99,8 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
   noticeEgressOnce();
   warnYoloMode(config.agent.permissionMode);
 
+  const lock = acquireLock(workspace.projectRoot);
+  const audit = createAuditLogger(workspace.projectRoot);
   const provider = createProvider(config, reportStatus);
   await provider.init();
   const registry = createDefaultRegistry();
@@ -108,7 +112,7 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
       try {
         const result = await runAgent(
           `完成以下开发任务（完成后必须运行测试/类型检查验证通过再 DONE）：\n${task.description}`,
-          { provider, registry, gate, workspace, config: config.agent, ui: { onStatus: reportStatus } },
+          { provider, registry, gate, workspace, config: config.agent, audit, ui: { onStatus: reportStatus } },
         );
         process.stdout.write(`任务 ${task.id} 完成：${result.summary}\n`);
         content = readFileSync(tasksPath, 'utf8');
@@ -139,6 +143,7 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
     }
   } finally {
     await provider.close();
+    lock.release();
   }
   if (failed > 0) {
     process.exitCode = 1;

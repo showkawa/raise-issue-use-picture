@@ -4,6 +4,8 @@ import { createProvider } from '../provider/factory.js';
 import { runAgent } from '../agent/loop.js';
 import { PermissionGate, type ConfirmHandler } from '../agent/permissions.js';
 import { createDefaultRegistry } from '../agent/tools/registry.js';
+import { acquireLock } from '../agent/lock.js';
+import { createAuditLogger } from '../agent/audit.js';
 import { buildWorkspaceInfo, expandFileReferences } from '../context/workspace.js';
 import type { CommandOpts } from './ask.js';
 import { browserFlagsFromOptions } from './utils.js';
@@ -55,6 +57,7 @@ export async function codeCommand(task: string, opts: CodeCommandOpts): Promise<
 
   const workspace = buildWorkspaceInfo();
   const expandedTask = expandFileReferences(task, workspace.projectRoot);
+  const lock = acquireLock(workspace.projectRoot);
   const provider = createProvider(config, reportStatus);
   await provider.init();
   try {
@@ -64,6 +67,7 @@ export async function codeCommand(task: string, opts: CodeCommandOpts): Promise<
       gate: new PermissionGate(config.agent, { confirm: interactiveConfirm() }),
       workspace,
       config: config.agent,
+      audit: createAuditLogger(workspace.projectRoot),
       ui: {
         onStatus: reportStatus,
         onCommentary: (text) => process.stderr.write(`\n${text}\n`),
@@ -74,5 +78,6 @@ export async function codeCommand(task: string, opts: CodeCommandOpts): Promise<
     process.stdout.write(`\n完成（${result.iterations} 轮迭代）：${result.summary}\n`);
   } finally {
     await provider.close();
+    lock.release();
   }
 }
