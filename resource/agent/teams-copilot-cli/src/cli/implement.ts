@@ -20,7 +20,19 @@ export interface ImplementCommandOpts extends CommandOpts {
   permissionMode?: string;
   yolo?: boolean;
   ask?: boolean;
+  allowDirty?: boolean;
   maxIterations?: string;
+}
+
+/** Refuses to start on a dirty worktree unless --allow-dirty, so the agent never
+ *  commits or clobbers the user's uncommitted changes (ADR-0005). */
+export function ensureCleanWorktree(changed: string[], allowDirty: boolean): void {
+  if (changed.length > 0 && !allowDirty) {
+    throw new Error(
+      `工作树不干净（${changed.length} 个未提交改动）。请先提交/暂存，`
+      + '或加 --allow-dirty 在脏工作树上运行（此时自动 commit 会被禁用）。',
+    );
+  }
 }
 
 function reportStatus(message: string): void {
@@ -74,8 +86,10 @@ export async function implementCommand(opts: ImplementCommandOpts): Promise<void
     }
   }
 
+  const initialDirty = changedFiles(workspace.projectRoot);
+  ensureCleanWorktree(initialDirty, opts.allowDirty === true);
   let autoCommit = opts.commit === true;
-  if (autoCommit && changedFiles(workspace.projectRoot).length > 0) {
+  if (autoCommit && initialDirty.length > 0) {
     process.stderr.write('[tcc] 工作树不干净，已禁用自动 commit（避免把你已有的改动一并提交）。\n');
     autoCommit = false;
   }
