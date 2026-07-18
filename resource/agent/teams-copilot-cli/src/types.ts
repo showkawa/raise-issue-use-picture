@@ -41,6 +41,8 @@ export interface AgentConfig {
   maxMessageChars: number;
   denyCommands: string[];
   allowCommands: string[];
+  /** Per-session bidirectional character budget before proactive rotation. */
+  sessionCharBudget?: number;
 }
 
 export type ProviderId = 'copilot-web' | 'mock';

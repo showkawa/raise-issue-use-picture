@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 import { resolveInsideRoot } from './fs-utils.js';
+import { isSensitivePath } from '../redaction.js';
 
 const DEFAULT_LIMIT = 400;
 
@@ -29,6 +30,12 @@ export const readFileTool: Tool<ReadFileArgs> = {
       absolute = resolveInsideRoot(ctx.projectRoot, args.path);
     } catch (error) {
       return { ok: false, output: error instanceof Error ? error.message : String(error) };
+    }
+    if (isSensitivePath(args.path, ctx.denyReadGlobs)) {
+      return {
+        ok: false,
+        output: `拒绝读取敏感文件 ${args.path}（匹配默认敏感文件规则，避免把凭据发送给 Copilot）。`,
+      };
     }
     let content: string;
     try {

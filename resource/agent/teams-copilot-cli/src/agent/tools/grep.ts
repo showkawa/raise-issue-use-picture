@@ -2,6 +2,9 @@ import { readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 import { globToRegExp, walkFiles } from './fs-utils.js';
+import { isSensitivePath } from '../redaction.js';
+
+const MAX_LINE_CHARS = 300;
 
 const MAX_MATCHES = 100;
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -37,17 +40,30 @@ export const grepTool: Tool<GrepArgs> = {
     const files = walkFiles(ctx.projectRoot);
     const matches: string[] = [];
     let scanned = 0;
+    let skippedSensitive = 0;
+    let skippedLarge = 0;
     for (const file of files) {
       if (prefix && !file.startsWith(prefix) && file !== prefix.slice(0, -1)) continue;
       if (globRegex && !globRegex.test(file)) continue;
+      if (isSensitivePath(file, ctx.denyReadGlobs)) {
+        skippedSensitive += 1;
+        continue;
+      }
       const full = join(ctx.projectRoot, file);
       try {
-        if (statSync(full).size > MAX_FILE_BYTES) continue;
+        if (statSync(full).size > MAX_FILE_BYTES) {
+          skippedLarge += 1;
+          continue;
+        }
         const lines = readFileSync(full, 'utf8').split(/\r?\n/);
         scanned += 1;
         for (const [index, line] of lines.entries()) {
           if (regex.test(line)) {
-            matches.push(`${file}:${index + 1}:${line.trim().slice(0, 300)}`);
+            const trimmed = line.trim();
+            const shown = trimmed.length > MAX_LINE_CHARS
+              ? `${trimmed.slice(0, MAX_LINE_CHARS)} …[行已截断]`
+              : trimmed;
+            matches.push(`${file}:${index + 1}:${shown}`);
             if (matches.length >= MAX_MATCHES) break;
           }
         }
@@ -56,12 +72,16 @@ export const grepTool: Tool<GrepArgs> = {
       }
       if (matches.length >= MAX_MATCHES) break;
     }
-    const truncatedNote = matches.length >= MAX_MATCHES ? `\n[结果达到 ${MAX_MATCHES} 条上限，已截断]` : '';
+    const notes: string[] = [];
+    if (matches.length >= MAX_MATCHES) notes.push(`结果达到 ${MAX_MATCHES} 条上限，已截断`);
+    if (skippedSensitive > 0) notes.push(`跳过 ${skippedSensitive} 个敏感文件（不发送给 Copilot）`);
+    if (skippedLarge > 0) notes.push(`跳过 ${skippedLarge} 个超过 ${MAX_FILE_BYTES} 字节的大文件`);
+    const footer = notes.length > 0 ? `\n[${notes.join('；')}]` : '';
     return {
       ok: true,
       output: matches.length > 0
-        ? `${matches.join('\n')}${truncatedNote}`
-        : `No matches for /${args.pattern}/ (scanned ${scanned} files)`,
+        ? `${matches.join('\n')}${footer}`
+        : `No matches for /${args.pattern}/ (scanned ${scanned} files)${footer}`,
     };
   },
 };

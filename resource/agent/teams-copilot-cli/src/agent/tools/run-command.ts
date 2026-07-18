@@ -1,9 +1,11 @@
 import { spawn } from 'child_process';
 import type { Tool, ToolContext, ToolResult } from './types.js';
 import { resolveInsideRoot } from './fs-utils.js';
+import { detectInteractive } from '../command-classify.js';
 
 const DEFAULT_TIMEOUT_MS = 120000;
-const MAX_OUTPUT_CHARS = 30000;
+// ~64KB total output cap: ~32KB per stream.
+const MAX_OUTPUT_CHARS = 32 * 1024;
 
 export interface RunCommandArgs {
   command: string;
@@ -40,6 +42,13 @@ export const runCommandTool: Tool<RunCommandArgs> = {
     required: ['command'],
   },
   async run(args: RunCommandArgs, ctx: ToolContext): Promise<ToolResult> {
+    const interactive = detectInteractive(args.command);
+    if (interactive.interactive) {
+      return {
+        ok: false,
+        output: `拒绝执行交互式命令：${interactive.reason}。请改用非交互参数（如 --yes / --no-input / -Command）。`,
+      };
+    }
     let cwd: string;
     try {
       cwd = args.cwd ? resolveInsideRoot(ctx.projectRoot, args.cwd) : ctx.projectRoot;

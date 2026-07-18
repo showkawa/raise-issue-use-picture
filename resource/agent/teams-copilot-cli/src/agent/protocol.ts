@@ -1,5 +1,6 @@
 import type { JsonSchemaLite } from './tools/types.js';
 import { validateArgs } from './tools/types.js';
+import { redactSecrets } from './redaction.js';
 
 export interface ToolCall {
   name: string;
@@ -144,6 +145,56 @@ export function escapeFences(text: string): string {
   return text.replace(/<<<(TOOL|DONE|RESULT)/g, '<<\u200b<$1');
 }
 
+/**
+ * Turn tagging: every outbound message is prefixed with `[turn N]` and the
+ * model is asked to echo `[ack turn N]`. A mismatch lets the loop detect that a reply
+ * belongs to a different request (request/response drift on the copilot-web channel).
+ */
+const TURN_ACK = /\[\s*(?:ack|re)\s*[:\s]?\s*turn\s+(\d+)\s*\]/i;
+
+export function tagTurn(turn: number, message: string): string {
+  return `[turn ${turn}]\n${message}`;
+}
+
+/** Extracts the turn number a reply claims to answer, or null when absent. */
+export function parseTurnAck(text: string): number | null {
+  const match = TURN_ACK.exec(text);
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+export interface HandshakeResult {
+  valid: boolean;
+  toolCount?: number;
+  problems: string[];
+}
+
+const HANDSHAKE_BLOCK = /<<<READY\b([^>]*)>>>/;
+
+/**
+ * Validates the protocol handshake reply (round-2 self-check after protocol injection).
+ * A valid handshake is a `<<<READY tools="N" ...>>>` block whose tool count matches the
+ * number of tools we advertised — proof the model rendered the fenced protocol verbatim.
+ */
+export function parseHandshake(text: string, expectedToolCount: number): HandshakeResult {
+  const block = HANDSHAKE_BLOCK.exec(text);
+  if (!block) {
+    return { valid: false, problems: ['未找到 <<<READY ...>>> 握手块'] };
+  }
+  const toolsAttr = /\btools\s*=\s*"?(\d+)"?/.exec(block[1]);
+  if (!toolsAttr) {
+    return { valid: false, problems: ['握手块缺少 tools="N" 字段'] };
+  }
+  const toolCount = Number.parseInt(toolsAttr[1], 10);
+  if (toolCount !== expectedToolCount) {
+    return {
+      valid: false,
+      toolCount,
+      problems: [`握手块声明工具数 ${toolCount}，与实际 ${expectedToolCount} 不符`],
+    };
+  }
+  return { valid: true, toolCount, problems: [] };
+}
+
 export interface FormatResultsOptions {
   /** Total character budget for the combined results message. */
   maxChars: number;
@@ -157,7 +208,7 @@ export function formatToolResults(
   const budget = Math.max(500, options.maxChars - header.length - 100);
   const perResult = Math.max(200, Math.floor(budget / Math.max(1, results.length)));
   const blocks = results.map((result) => {
-    const body = truncateMiddle(escapeFences(result.output), perResult);
+    const body = truncateMiddle(escapeFences(redactSecrets(result.output)), perResult);
     const exit = result.exitCode !== undefined ? ` exit="${result.exitCode}"` : '';
     return `<<<RESULT name="${result.name}" ok="${result.ok}"${exit}\n${body}\n>>>`;
   });

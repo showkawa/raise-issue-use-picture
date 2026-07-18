@@ -3,7 +3,10 @@ import {
   buildCorrectionMessage,
   escapeFences,
   formatToolResults,
+  parseHandshake,
   parseReply,
+  parseTurnAck,
+  tagTurn,
   truncateMiddle,
 } from '../src/agent/protocol.js';
 import type { JsonSchemaLite } from '../src/agent/tools/types.js';
@@ -147,7 +150,33 @@ describe('system prompt', () => {
     expect(prompt).toContain('read_file(path: string, offset?: number)');
     expect(prompt).toContain('C:/repo');
     expect(prompt).toContain('用中文写注释');
-    expect(prompt).toContain('只回复：OK');
+    expect(prompt).toContain('<<<READY tools="1"');
+    expect(prompt).toContain('[ack turn N]');
     expect(buildTaskMessage('修 bug')).toContain('修 bug');
+  });
+});
+
+describe('turn tagging', () => {
+  it('tags a message with [turn N] and parses the ack back', () => {
+    expect(tagTurn(7, 'hello')).toBe('[turn 7]\nhello');
+    expect(parseTurnAck('[ack turn 7]\n继续')).toBe(7);
+    expect(parseTurnAck('[re: turn 12] done')).toBe(12);
+    expect(parseTurnAck('no ack here')).toBeNull();
+  });
+});
+
+describe('parseHandshake', () => {
+  it('accepts a matching handshake block', () => {
+    const result = parseHandshake('```text\n<<<READY tools="7" protocol="ok">>>\n```', 7);
+    expect(result.valid).toBe(true);
+    expect(result.toolCount).toBe(7);
+  });
+
+  it('rejects a missing block, missing count, or mismatched count', () => {
+    expect(parseHandshake('OK', 7).valid).toBe(false);
+    expect(parseHandshake('<<<READY protocol="ok">>>', 7).valid).toBe(false);
+    const mismatch = parseHandshake('<<<READY tools="3">>>', 7);
+    expect(mismatch.valid).toBe(false);
+    expect(mismatch.toolCount).toBe(3);
   });
 });

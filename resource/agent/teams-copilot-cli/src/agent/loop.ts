@@ -5,13 +5,19 @@ import type { ToolCall } from './protocol.js';
 import {
   buildCorrectionMessage,
   formatToolResults,
+  parseHandshake,
   parseReply,
+  parseTurnAck,
+  tagTurn,
   type ProtocolToolResult,
 } from './protocol.js';
 import type { ToolRegistry } from './tools/registry.js';
+import type { AuditLogger } from './audit.js';
 import { buildProtocolPrompt, buildTaskMessage, type WorkspaceInfo } from './system-prompt.js';
 
 const MAX_CORRECTIONS = 2;
+const MAX_FORGETTING_RECOVERIES = 1;
+const DEFAULT_SESSION_CHAR_BUDGET = 40000;
 const TOOL_TIMEOUT_MS = 300000;
 const SEND_RETRIES = 2;
 
@@ -30,6 +36,7 @@ export interface AgentDeps {
   workspace: WorkspaceInfo;
   config: AgentConfig;
   ui?: AgentUi;
+  audit?: AuditLogger;
 }
 
 export interface AgentRunResult {
@@ -63,24 +70,38 @@ interface LoopSession {
 }
 
 export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunResult> {
-  const { provider, registry, gate, workspace, config, ui } = deps;
+  const { provider, registry, gate, workspace, config, ui, audit } = deps;
   const capabilities = provider.capabilities();
   const schemas = registry.schemas();
   const actions: string[] = [];
   let lastSendAt = 0;
 
   const state: LoopSession = { session: await provider.createSession(), turnsUsed: 0, charsUsed: 0 };
+  let turnSeq = 0;
 
   async function send(message: string, stream = false): Promise<ChatTurnResult> {
-    const wait = config.minSendIntervalMs - (Date.now() - lastSendAt);
+    // Tag every outbound message with a monotonic [turn N] and check the reply echoes
+    // it back, so request/response drift on the copilot-web channel is detectable.
+    turnSeq += 1;
+    const turn = turnSeq;
+    const tagged = tagTurn(turn, message);
+    // Add up to 30% random jitter to the send interval so the cadence doesn't look
+    // like a fixed-rate bot to the Copilot tenant's abuse detection.
+    const interval = config.minSendIntervalMs;
+    const jitter = interval > 0 ? Math.floor(Math.random() * interval * 0.3) : 0;
+    const wait = interval + jitter - (Date.now() - lastSendAt);
     if (wait > 0) await sleep(wait);
     let lastError: unknown;
     for (let attempt = 0; attempt <= SEND_RETRIES; attempt++) {
       try {
-        const result = await sendChunked(state.session, message, capabilities.maxMessageChars, stream ? ui?.streamChunk : undefined);
+        const result = await sendChunked(state.session, tagged, capabilities.maxMessageChars, stream ? ui?.streamChunk : undefined);
         lastSendAt = Date.now();
         state.turnsUsed += 1;
-        state.charsUsed += message.length + result.text.length;
+        state.charsUsed += tagged.length + result.text.length;
+        const ack = parseTurnAck(result.text);
+        if (ack !== null && ack !== turn) {
+          ui?.onStatus?.(`检测到请求/回复错位：期望 [ack turn ${turn}]，收到 [ack turn ${ack}]`);
+        }
         return result;
       } catch (error) {
         lastError = error;
@@ -93,17 +114,32 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
 
   async function injectProtocol(): Promise<void> {
     ui?.onStatus?.('注入协议提示词...');
-    await send(buildProtocolPrompt(workspace, registry.list()));
+    const tools = registry.list();
+    const reply = await send(buildProtocolPrompt(workspace, tools));
+    // Round-2 self-check: verify the model echoed a well-formed handshake block. Soft
+    // (status only) — the first real request will surface any deeper protocol issues.
+    const handshake = parseHandshake(reply.text, tools.length);
+    if (!handshake.valid) {
+      ui?.onStatus?.(`协议握手自检未通过：${handshake.problems.join('；')}`);
+    }
+  }
+
+  const charBudget = config.sessionCharBudget ?? DEFAULT_SESSION_CHAR_BUDGET;
+
+  function resultBudget(): number {
+    return shrinkResultBudget(state.charsUsed, charBudget, capabilities.maxMessageChars);
   }
 
   /** Returns a context-recovery prefix for the next message when the session was rebuilt. */
-  async function rotateSessionIfNeeded(): Promise<string> {
+  async function rotateSessionIfNeeded(force = false): Promise<string> {
     const nearTurnBudget = state.turnsUsed >= Math.max(4, config.maxTurnsPerConversation - 2);
-    const charBudget = config.maxMessageChars * config.maxTurnsPerConversation;
-    const overCharBudget = state.charsUsed >= charBudget;
+    // Rotate proactively at 85% of the budget rather than waiting for overflow.
+    const overCharBudget = state.charsUsed >= charBudget * 0.85;
     const healthy = await state.session.healthy().catch(() => false);
-    if (!nearTurnBudget && !overCharBudget && healthy) return '';
-    ui?.onStatus?.(nearTurnBudget || overCharBudget
+    if (!force && !nearTurnBudget && !overCharBudget && healthy) return '';
+    ui?.onStatus?.(force
+      ? '疑似协议遗忘：重建会话并重新注入协议...'
+      : nearTurnBudget || overCharBudget
       ? `会话上下文逼近预算（轮次 ${state.turnsUsed}/${config.maxTurnsPerConversation}，字符 ${state.charsUsed}/${charBudget}），开新会话...`
       : '会话不健康（登录过期/页面刷新），重建会话...');
     try {
@@ -114,6 +150,7 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
     state.session = await provider.createSession();
     state.turnsUsed = 0;
     state.charsUsed = 0;
+    turnSeq = 0;
     await injectProtocol();
     return [
       '会话已重建。原始任务：',
@@ -128,6 +165,7 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
   await injectProtocol();
   let pending = await send(buildTaskMessage(task), true);
   let corrections = 0;
+  let forgettingRecoveries = 0;
 
   for (let iteration = 0; iteration < config.maxIterations; iteration++) {
     const parsed = parseReply(pending.text, schemas);
@@ -139,6 +177,15 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
     if (parsed.kind === 'malformed') {
       corrections += 1;
       if (corrections > MAX_CORRECTIONS) {
+        // Repeated malformed/free-form replies suggest the model forgot the protocol:
+        // rebuild the session, re-inject the protocol, and give it a fresh budget once.
+        if (forgettingRecoveries < MAX_FORGETTING_RECOVERIES) {
+          forgettingRecoveries += 1;
+          corrections = 0;
+          const recovery = await rotateSessionIfNeeded(true);
+          pending = await send(recovery + buildCorrectionMessage(parsed.problems));
+          continue;
+        }
         throw new AgentProtocolError(parsed.problems, parsed.raw);
       }
       ui?.onStatus?.(`回复格式无法解析，请求纠正（${corrections}/${MAX_CORRECTIONS}）...`);
@@ -176,14 +223,36 @@ export async function runAgent(task: string, deps: AgentDeps): Promise<AgentRunR
       }
       results.push(result);
       actions.push(describeAction(call, result));
+      audit?.({
+        tool: call.name,
+        target: describeTarget(call),
+        allowed: decision.allowed,
+        ok: result.ok,
+        exitCode: result.exitCode,
+        reason: decision.allowed ? undefined : decision.reason,
+      });
       ui?.onToolResult?.(call, result);
     }
 
     const recovery = await rotateSessionIfNeeded();
-    pending = await send(recovery + formatToolResults(results, { maxChars: capabilities.maxMessageChars }), true);
+    pending = await send(recovery + formatToolResults(results, { maxChars: resultBudget() }), true);
   }
 
   throw new AgentMaxIterationsError(config.maxIterations, actions);
+}
+
+/**
+ * Shrinks the RESULT reinjection budget as the session fills up: once past
+ * 60% of the session char budget, halve the per-message budget (floored at 1500).
+ */
+export function shrinkResultBudget(
+  charsUsed: number,
+  charBudget: number,
+  maxMessageChars: number,
+): number {
+  const ratio = charBudget > 0 ? charsUsed / charBudget : 0;
+  const factor = ratio > 0.6 ? 0.5 : 1;
+  return Math.max(1500, Math.floor(maxMessageChars * factor));
 }
 
 /** Splits an over-long message into parts; the model is told to reply OK until the last part. */
@@ -211,13 +280,16 @@ export async function sendChunked(
   return last!;
 }
 
-function describeAction(call: ToolCall, result: ProtocolToolResult): string {
-  const target = typeof call.args.path === 'string' ? call.args.path
+function describeTarget(call: ToolCall): string {
+  return typeof call.args.path === 'string' ? call.args.path
     : typeof call.args.command === 'string' ? call.args.command.slice(0, 80)
     : typeof call.args.pattern === 'string' ? call.args.pattern
     : typeof call.args.subcommand === 'string' ? call.args.subcommand
     : '';
-  return `${call.name}(${target}) → ${result.ok ? 'ok' : `失败: ${result.output.slice(0, 120)}`}`;
+}
+
+function describeAction(call: ToolCall, result: ProtocolToolResult): string {
+  return `${call.name}(${describeTarget(call)}) → ${result.ok ? 'ok' : `失败: ${result.output.slice(0, 120)}`}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

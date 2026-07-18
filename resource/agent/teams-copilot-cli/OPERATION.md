@@ -2,8 +2,8 @@
 
 ## 1. 安装
 
-```bash
-cd resource/agent/teams-copilot-cli
+```bat
+cd resource\agent\teams-copilot-cli
 npm install
 npm run build
 ```
@@ -14,10 +14,10 @@ npm run build
 
 CLI 会通过 CDP 启动或连接浏览器，直接访问 `https://m365.cloud.microsoft/chat`，并复用 `browser.userDataDir` 对应的登录态。首次使用时，请在该浏览器 Profile 中登录 Microsoft 365 Copilot 并完成 MFA。
 
-若要复用已经打开的 Chrome 标签页，请先完全退出普通 Chrome，再用 PowerShell 启动 Debug 模式：
+若要复用已经打开的 Chrome 标签页，请先完全退出普通 Chrome，再用 CMD 启动 Debug 模式：
 
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="$env:USERPROFILE\.m365-copilot\chrome-profile"
+```bat
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --user-data-dir="%USERPROFILE%\.m365-copilot\chrome-profile"
 ```
 
 随后在该 Chrome 中打开 Copilot Chat。CLI 会优先复用已有的 `/chat` 或 `/chat/conversation/...` 标签页。
@@ -28,20 +28,20 @@ CLI 不存储 Microsoft 密码、Cookie 或 MFA 信息。
 
 默认配置可直接运行。需要覆盖时，复制 `config.example.yaml`，然后通过 `--config` 指定：
 
-```bash
+```bat
 teams-copilot --config C:\path\to\config.yaml ask "你好"
 ```
 
 推荐使用简短命令 `tcc`；原来的 `teams-copilot` 仍作为兼容别名保留：
 
-```powershell
+```bat
 tcc "你好"
 tcc ask "你好"
 ```
 
 以上两条命令等价。
 
-也可用 `TEAMS_COPILOT_BROWSER` 指定浏览器可执行文件。未指定时优先使用 Chrome，再扫描 Edge 和 Chromium。
+也可用 `TEAMS_COPILOT_BROWSER` 指定浏览器可执行文件。未指定时优先使用 Chrome，再扫描 Edge 和 Chromium。CMD 中设置环境变量用 `set TEAMS_COPILOT_BROWSER=C:\path\to\chrome.exe`。
 
 旧版 `edge.executablePath`、`edge.debuggingPort`、`copilot.inputSelector` 配置仍兼容。
 
@@ -61,7 +61,7 @@ tcc ask "你好"
 
 ## 4. 命令
 
-```bash
+```bat
 tcc "用 TypeScript 写一个防抖函数"
 tcc ask "用 TypeScript 写一个防抖函数"
 tcc @
@@ -89,7 +89,7 @@ tcc repl
 一次已等待时间，并显示配置的超时值（默认 120 秒）；Copilot 正文仍只
 写入 stdout。
 
-在 CMD 或 Git Bash 中输入包含引号、反引号、`$`、重定向符号等特殊字符
+在 CMD 中输入包含引号、反引号、`$`、重定向符号等特殊字符
 的多行问题时，运行 `tcc @`，粘贴文本或代码，并用单独一行 `@` 结束：
 
 ```text
@@ -105,42 +105,34 @@ CLI 会自行读取 `tcc @` 后的每一行，因此内容不会再作为 Shell 
 
 通过文件内容提问，不执行附件上传：
 
-```powershell
+```bat
 tcc ask "解释这段代码在做什么" --file .\src\cli\tasks.ts
 tcc ask "解释这段代码在做什么" -f .\src\cli\tasks.ts
 ```
 
-通过 PowerShell 标准输入直接提供多行代码。`ask` 会自动读取非空管道输入，因此管道场景可省略 `--stdin`：
+通过 CMD 标准输入直接提供代码。`ask` 会自动读取非空管道输入，因此管道场景可省略 `--stdin`：
 
-```powershell
-Get-Content -Raw .\src\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
-
-@'
-const value = 1;
-console.log(value);
-'@ | tcc ask "解释这段代码" --stdin --language typescript
+```bat
+type .\src\cli\tasks.ts | tcc ask "解释这段代码在做什么" --language typescript
 ```
 
-在 Bash 中可使用带引号的 heredoc，源码中的单引号和 `<project-name>` 不会再被 Shell 解析：
+CMD 没有 here-string/heredoc 语法。需要粘贴多行代码时，使用 CLI 自带的 `tcc @` 多行模式（见上文），或先写入文件再用 `type` 管道输入：
 
-```bash
-tcc ask "解释这段代码" --language typescript < ./src/cli/tasks.ts
-
-tcc ask "解释这段代码" --stdin --language typescript <<'CODE'
-import path from 'node:path';
-const usage = '<project-name>';
-CODE
+```bat
+type .\src\example.ts | tcc ask "解释这段代码" --stdin --language typescript
 ```
+
+在 `tcc @` 或文件管道场景下，源码中的单引号、反引号、`$` 和 `<project-name>` 等特殊字符都不会再被 Shell 解析。
 
 保存回答：
 
-```powershell
+```bat
 tcc ask "解释这段代码" -f .\src\cli\tasks.ts -o .\answer.md
 ```
 
 上传代码并将报告同时保存到本地：
 
-```powershell
+```bat
 tcc --no-stream review .\src\example.ts --output .\review.md
 tcc --no-stream review .\src\example.ts -o .\review.md
 ```
@@ -159,7 +151,7 @@ REPL 内置命令：
 
 ## 5. 验证
 
-```bash
+```bat
 npm run typecheck
 npm test
 npm run build

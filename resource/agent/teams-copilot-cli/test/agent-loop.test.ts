@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentMaxIterationsError, AgentProtocolError, runAgent, sendChunked } from '../src/agent/loop.js';
+import { AgentMaxIterationsError, AgentProtocolError, runAgent, sendChunked, shrinkResultBudget } from '../src/agent/loop.js';
 import { PermissionGate } from '../src/agent/permissions.js';
 import { createDefaultRegistry } from '../src/agent/tools/registry.js';
 import type { WorkspaceInfo } from '../src/agent/system-prompt.js';
@@ -79,13 +79,33 @@ describe('runAgent (MockProvider integration)', () => {
     expect(readFileSync(join(root, 'app.txt'), 'utf8')).toBe('hi world\n');
   });
 
-  it('sends a correction message on malformed replies, then errors after the limit', async () => {
+  it('corrects malformed replies, attempts a protocol-forgetting recovery, then errors', async () => {
     const provider = new MockProvider([], {
       respond: () => '我不想遵守协议。',
     });
     await expect(runAgent('task', { ...deps(provider) })).rejects.toThrow(AgentProtocolError);
+    // 2 corrections, then a forced session rebuild (re-injects protocol), then 3 more corrections.
     const corrections = provider.sent.filter((message) => message.includes('无法解析'));
-    expect(corrections.length).toBe(2);
+    expect(corrections.length).toBe(5);
+    // Protocol was injected once initially and once during the forgetting recovery.
+    const injections = provider.sent.filter((message) => message.includes('工具清单'));
+    expect(injections.length).toBe(2);
+  });
+
+  it('tags outbound messages with [turn N] and detects ack misalignment', async () => {
+    writeFileSync(join(root, 'app.txt'), 'v=1\n');
+    const statuses: string[] = [];
+    const provider = new MockProvider([], {
+      respond: (message) => {
+        if (message.includes('工具清单')) return '[ack turn 1]\n<<<READY tools="7" protocol="ok">>>';
+        if (message.includes('## 任务')) return `[ack turn 99]\n${toolBlock('read_file', { path: 'app.txt' })}`;
+        return '<<<DONE\n完成\n>>>';
+      },
+    });
+    await runAgent('t', { ...deps(provider), ui: { onStatus: (message) => statuses.push(message) } });
+    expect(provider.sent[0].startsWith('[turn 1]')).toBe(true);
+    expect(provider.sent[1].startsWith('[turn 2]')).toBe(true);
+    expect(statuses.some((status) => status.includes('错位'))).toBe(true);
   });
 
   it('denies gated calls and reports the denial to the model', async () => {
@@ -166,5 +186,19 @@ describe('sendChunked', () => {
     expect(provider.sent[0]).toContain('只回复 OK');
     expect(provider.sent[2]).toContain('[part 3/3]');
     expect(provider.sent.map((part) => part.replace(/^\[part [^\]]+\][^\n]*\n/, '')).join('')).toBe(message);
+  });
+});
+
+describe('shrinkResultBudget', () => {
+  it('keeps the full budget below 60% usage', () => {
+    expect(shrinkResultBudget(1000, 40000, 8000)).toBe(8000);
+  });
+
+  it('halves the budget once usage passes 60%', () => {
+    expect(shrinkResultBudget(30000, 40000, 8000)).toBe(4000);
+  });
+
+  it('never shrinks below the 1500 floor', () => {
+    expect(shrinkResultBudget(39000, 40000, 2000)).toBe(1500);
   });
 });
