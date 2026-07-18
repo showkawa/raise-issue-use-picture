@@ -17,7 +17,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 
 ## Quick Start
 
-```powershell
+```bat
 uv sync
 uv run copilot-openai-proxy serve
 ```
@@ -40,21 +40,10 @@ If startup says it is waiting for a token, click the Copilot message box and typ
 
 ## Test It
 
-```powershell
-$body = @{
-  model = "m365-copilot"
-  messages = @(
-    @{ role = "user"; content = "Say hello in one short sentence." }
-  )
-} | ConvertTo-Json -Depth 10
-
-$r = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/v1/chat/completions" `
-  -ContentType "application/json" `
-  -Body $body
-
-$r.choices[0].message.content
+```bat
+curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}]}"
 ```
 
 ## Connect A Client
@@ -70,9 +59,9 @@ Use these settings for any OpenAI-compatible client:
 
 ### OpenCode
 
-```powershell
-$env:OPENAI_BASE_URL = "http://127.0.0.1:8000"
-$env:OPENAI_API_KEY = "dummy"
+```bat
+set OPENAI_BASE_URL=http://127.0.0.1:8000
+set OPENAI_API_KEY=dummy
 opencode
 ```
 
@@ -90,7 +79,7 @@ m365-copilot:persist
 
 ### Continue
 
-Add this to `~/.continue/config.json`:
+Add this to `%USERPROFILE%\.continue\config.json`:
 
 ```json
 {
@@ -108,9 +97,9 @@ Add this to `~/.continue/config.json`:
 
 ### Claude Code
 
-```powershell
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8000"
-$env:ANTHROPIC_API_KEY = "dummy"
+```bat
+set ANTHROPIC_BASE_URL=http://127.0.0.1:8000
+set ANTHROPIC_API_KEY=dummy
 claude
 ```
 
@@ -142,13 +131,13 @@ M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes 
 
 Auto-refresh is on by default:
 
-```powershell
+```bat
 uv run copilot-openai-proxy serve
 ```
 
 Useful controls:
 
-```powershell
+```bat
 uv run copilot-openai-proxy serve --refresh-before-seconds 300
 uv run copilot-openai-proxy serve --no-auto-refresh
 uv run copilot-openai-proxy serve --no-capture-on-start
@@ -159,7 +148,7 @@ You can also press `r` in the server console to refresh the token manually.
 
 ### Manual Fallback
 
-```powershell
+```bat
 uv run copilot-openai-proxy set-token
 ```
 
@@ -176,9 +165,9 @@ The command extracts `access_token` automatically and writes it to `.env`.
 
 ## Token Health
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/healthz
-Invoke-RestMethod http://127.0.0.1:8000/v1/token/status
+```bat
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/v1/token/status
 ```
 
 Example:
@@ -209,54 +198,27 @@ Example:
 
 ### Streaming
 
-```powershell
-$body = @{
-  model = "m365-copilot"
-  stream = $true
-  messages = @(@{ role = "user"; content = "hi" })
-} | ConvertTo-Json -Depth 10
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/v1/chat/completions" `
-  -ContentType "application/json" `
-  -Body $body
+```bat
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"m365-copilot\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
 ```
 
 ### Persistent Session
 
-```powershell
-$body = @{
-  model = "m365-copilot"
-  messages = @(
-    @{ role = "user"; content = "Remember this code word: sakura. Reply only OK." }
-  )
-} | ConvertTo-Json -Depth 10
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/v1/chat/completions" `
-  -Headers @{ "X-M365-Session-Id" = "test1" } `
-  -ContentType "application/json" `
-  -Body $body
+```bat
+curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -H "X-M365-Session-Id: test1" ^
+  -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Remember this code word: sakura. Reply only OK.\"}]}"
 ```
 
 ### Anthropic-Style Messages
 
-```powershell
-$body = @{
-  model = "m365-copilot"
-  system = "Be concise."
-  messages = @(@{ role = "user"; content = "hi" })
-} | ConvertTo-Json -Depth 10
-
-$r = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/v1/messages" `
-  -ContentType "application/json" `
-  -Body $body
-
-$r.content[0].text
+```bat
+curl -X POST http://127.0.0.1:8000/v1/messages ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"m365-copilot\",\"system\":\"Be concise.\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
 ```
 
 ## Security Notes

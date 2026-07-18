@@ -4,9 +4,9 @@ The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admi
 
 ## Current manual flow
 
-```powershell
+```bat
 uv run copilot-openai-proxy set-token
-# paste full WebSocket URL from DevTools → Network → substrate WebSocket → Headers
+REM paste full WebSocket URL from DevTools -> Network -> substrate WebSocket -> Headers
 ```
 
 ---
@@ -52,7 +52,7 @@ Schedule with `schedule` or `apscheduler` every 50 minutes.
 Launch a dedicated Edge profile with the remote debugging flag, then connect to it via CDP.
 
 **Start the server:**
-```powershell
+```bat
 uv run copilot-openai-proxy serve
 ```
 
@@ -68,7 +68,7 @@ startup capture listener. Generate a new WebSocket by pressing `F5` in the debug
 the message box, and typing one character. The message does not need to be sent.
 
 Useful serve flags:
-```powershell
+```bat
 uv run copilot-openai-proxy serve --refresh-before-seconds 300
 uv run copilot-openai-proxy serve --no-launch-edge
 uv run copilot-openai-proxy serve --no-capture-on-start
