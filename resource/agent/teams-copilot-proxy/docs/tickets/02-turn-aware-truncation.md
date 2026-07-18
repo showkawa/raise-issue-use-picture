@@ -7,10 +7,10 @@ context bounder); this ticket only makes the safety-net truncation protocol-safe
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Truncation drops content in whole-turn units, oldest first.
-- [ ] A retained Tool Call Envelope always keeps its paired tool result (and vice versa); the pair is never split across the budget cut.
-- [ ] The transcript handed to the Copilot client stays within the configured Transcript Budget.
-- [ ] Existing non-tool truncation behaviour is preserved for histories without tool calls.
-- [ ] Tests at the HTTP seam feed an oversized interleaved history and assert the upstream transcript is within budget and every retained envelope has its result.
+- [x] Truncation drops content in whole-turn units, oldest first. (`_group_turn_units`)
+- [x] A retained Tool Call Envelope always keeps its paired tool result (and vice versa); the pair is never split across the budget cut.
+- [x] The transcript handed to the Copilot client stays within the configured Transcript Budget. (marker length reserved)
+- [x] Existing non-tool truncation behaviour is preserved for histories without tool calls (each non-tool line is its own unit).
+- [x] Tests at the HTTP seam feed an oversized interleaved history and assert the upstream transcript is within budget and every retained envelope has its result.

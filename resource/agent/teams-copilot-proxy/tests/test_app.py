@@ -724,6 +724,67 @@ def test_correction_count_is_configurable_and_final_attempt_is_strict() -> None:
     assert "final attempt" not in fake.calls[1][0]
 
 
+def _transcript_sent(fake: FakeCopilotClient) -> str:
+    for _prompt, context in fake.calls:
+        for part in context:
+            if part.startswith("Prior conversation transcript:"):
+                return part[len("Prior conversation transcript:\n"):]
+    return ""
+
+
+def _history_with_tool_turn() -> list[dict]:
+    messages: list[dict] = []
+    for _ in range(6):
+        messages.append({"role": "user", "content": "F" * 100})
+        messages.append({"role": "assistant", "content": "A" * 100})
+    messages.append(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "a.py"}'},
+                }
+            ],
+        }
+    )
+    messages.append({"role": "tool", "tool_call_id": "call_1", "content": "R" * 200})
+    messages.append({"role": "user", "content": "continue"})
+    return messages
+
+
+def _post_with_budget(budget: int) -> FakeCopilotClient:
+    fake = FakeCopilotClient()
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_MAX_TRANSCRIPT_CHARS=budget)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": _history_with_tool_turn()},
+    )
+    assert response.status_code == 200
+    return fake
+
+
+def test_turn_aware_truncation_never_orphans_a_tool_result() -> None:
+    transcript = _transcript_sent(_post_with_budget(250))
+
+    if "Tool result (call_1)" in transcript:
+        assert "[tool call]" in transcript
+
+
+def test_turn_aware_truncation_keeps_tool_call_with_result_within_budget() -> None:
+    budget = 400
+    transcript = _transcript_sent(_post_with_budget(budget))
+
+    assert "[tool call]" in transcript
+    assert "Tool result (call_1)" in transcript
+    assert "FFFFFFFFFF" not in transcript
+    assert len(transcript) <= budget
+
+
 def test_responses_requires_final_user_message() -> None:
     client = build_client(FakeCopilotClient())
     response = client.post(

@@ -42,22 +42,57 @@ def _render_openai_message(message) -> str:
     return f"{message.role.capitalize()}: {text}"
 
 
+_TRUNCATION_MARKER = "[earlier conversation truncated]"
+
+
+def _is_tool_call_line(line: str) -> bool:
+    return line.startswith("Assistant:") and "[tool call]" in line
+
+
+def _is_tool_result_line(line: str) -> bool:
+    return line.startswith("Tool result (")
+
+
+def _group_turn_units(transcript_lines: list[str]) -> list[list[str]]:
+    """Group each transcript line into a turn unit, binding a tool call to the
+    tool result(s) that immediately follow it so they are never split apart."""
+    units: list[list[str]] = []
+    index = 0
+    total = len(transcript_lines)
+    while index < total:
+        line = transcript_lines[index]
+        if _is_tool_call_line(line):
+            unit = [line]
+            following = index + 1
+            while following < total and _is_tool_result_line(transcript_lines[following]):
+                unit.append(transcript_lines[following])
+                following += 1
+            units.append(unit)
+            index = following
+        else:
+            units.append([line])
+            index += 1
+    return units
+
+
 def _truncate_transcript(transcript_lines: list[str], budget: int) -> list[str]:
     if budget <= 0:
         return transcript_lines
     total = sum(len(line) + 1 for line in transcript_lines)
     if total <= budget:
         return transcript_lines
-    kept: list[str] = []
+
+    effective = budget - (len(_TRUNCATION_MARKER) + 1)
+    kept_units: list[list[str]] = []
     used = 0
-    for line in reversed(transcript_lines):
-        used += len(line) + 1
-        if used > budget:
+    for unit in reversed(_group_turn_units(transcript_lines)):
+        used += sum(len(line) + 1 for line in unit)
+        if used > effective:
             break
-        kept.append(line)
-    kept.reverse()
-    if len(kept) < len(transcript_lines):
-        kept.insert(0, "[earlier conversation truncated]")
+        kept_units.append(unit)
+    kept_units.reverse()
+    kept = [line for unit in kept_units for line in unit]
+    kept.insert(0, _TRUNCATION_MARKER)
     return kept
 
 
