@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "teams-copilot": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Teams Copilot Proxy",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "unused"
+      },
+      "models": {
+        "m365-copilot": {
+          "name": "M365 Copilot",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}

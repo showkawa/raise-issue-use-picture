@@ -4,6 +4,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -856,6 +857,15 @@ def test_outbound_redaction_does_not_change_response() -> None:
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "copilot reply"
+
+
+def test_example_opencode_config_parses_and_declares_tool_call() -> None:
+    config_path = Path(__file__).resolve().parent.parent / "examples" / "opencode.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    model = config["provider"]["teams-copilot"]["models"]["m365-copilot"]
+    assert model["tool_call"] is True
+    options = config["provider"]["teams-copilot"]["options"]
+    assert options["baseURL"] == "http://127.0.0.1:8000/v1"
 
 
 def test_responses_requires_final_user_message() -> None:

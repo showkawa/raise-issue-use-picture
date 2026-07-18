@@ -78,7 +78,9 @@ For persistent Copilot-side conversation memory:
 m365-copilot:persist
 ```
 
-Tool calling: when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked once, then degrade to plain text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
+Tool calling: when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
+
+For a ready-to-use project-level config and the full loop mapping, see [examples/opencode.json](examples/opencode.json) and [docs/opencode-integration.md](docs/opencode-integration.md).
 
 ### Codex CLI
 
@@ -245,7 +247,9 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_ACCESS_TOKEN` | optional at startup | Browser WebSocket token. If missing, startup capture can fill `.env`. |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Optional. Time zone sent to Copilot. Usually no need to set this if `Asia/Tokyo` is correct. |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Optional. Model name returned by `/v1/models`. Usually no need to change this. |
-| `M365_MAX_TRANSCRIPT_CHARS` | `200000` | Optional. Character budget for the flattened prior-conversation transcript; oldest lines are dropped first. |
+| `M365_MAX_TRANSCRIPT_CHARS` | `200000` | Optional. Safety-net character budget for the flattened prior-conversation transcript; whole turn units are dropped oldest-first and a tool call is never split from its result. OpenCode is the primary context bounder. |
+| `M365_TOOL_CORRECTION_RETRIES` | `1` | Optional. Number of correction attempts when Copilot returns a malformed tool call. The final attempt uses a stricter reminder; after all attempts fail the proxy returns the Failure Sentinel with `finish_reason: stop`. |
+| `M365_REDACT_OUTBOUND` | `true` | Optional. When on, scrubs secret-like strings (tokens, API keys, private keys, `KEY=value` env secrets) from everything sent upstream to Copilot, replacing them with `[REDACTED]`. Only affects outbound content, not the client response. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 
 ## Limitations
