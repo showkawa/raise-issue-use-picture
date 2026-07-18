@@ -19,6 +19,7 @@ const AGENT_DEFAULTS: AgentConfig = {
     'npm publish',
   ],
   allowCommands: [],
+  sessionCharBudget: 40000,
 };
 
 const DEFAULTS: AppConfig = {
