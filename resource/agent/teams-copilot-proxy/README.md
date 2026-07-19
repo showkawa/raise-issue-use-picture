@@ -150,23 +150,23 @@ model_provider = "teams-copilot"
 
 ## Persistent Sessions
 
-By default, requests are stateless from the Copilot side.
+By default, requests are stateless from the Copilot side, and this is the **recommended mode for agentic clients** like OpenCode: the client owns the conversation history and replays it every turn, so a stateless `m365-copilot` keeps history in a single source of truth. Persistent Copilot-side memory on top of a client that already resends history double-counts context and hits Copilot's input limit sooner — do not use it for tool/loop workflows.
 
-To reuse the same Copilot conversation across turns, send a stable header:
+If you do want Copilot to keep its own memory across turns (e.g. a plain chat client that does *not* resend history), the **recommended** primitive is a stable per-conversation header:
 
 ```http
 X-M365-Session-Id: my-work-session
 ```
 
-Or use the model suffix:
+Each workspace or conversation should pick its own id. This keeps concurrent conversations isolated.
+
+The `m365-copilot:persist` model suffix is a convenience for clients that can only change the model name, not headers:
 
 ```text
 m365-copilot:persist
 ```
 
-Header mode is better when your client supports custom headers, because each workspace or coding-agent session can choose its own id. If your client only lets you change the model name, use `m365-copilot:persist`.
-
-If a client uses `m365-copilot:persist` without sending a `user` field, all requests share one default persistent session until the proxy restarts.
+**Caveat (do not rely on for concurrency):** without an `X-M365-Session-Id` header, `:persist` keys the session by the request `user` field, falling back to a single global `default` key when `user` is absent. That means multiple concurrent conversations using `:persist` share one Copilot session and cross-contaminate. Prefer the header. See the tracked limitation in [docs/tickets/05-persist-session-key-collision.md](docs/tickets/05-persist-session-key-collision.md).
 
 ## Examples
 
