@@ -5,7 +5,6 @@ import type {
   ChatTurnResult,
   CreateSessionOptions,
   Provider,
-  ProviderCapabilities,
 } from './types.js';
 
 interface ChatMessage {
@@ -16,7 +15,6 @@ interface ChatMessage {
 interface ChatCompletionChoice {
   message?: { content?: string };
   delta?: { content?: string };
-  finish_reason?: string | null;
 }
 
 interface ChatCompletionResponse {
@@ -45,34 +43,22 @@ export class ProxyProvider implements Provider {
     return {
       async send(message: string, turnOptions: ChatTurnOptions = {}): Promise<ChatTurnResult> {
         history.push({ role: 'user', content: message });
-        const started = Date.now();
-        const { text, truncated } = await postChat(config, history, turnOptions);
+        const text = await postChat(config, history, turnOptions);
         history.push({ role: 'assistant', content: text });
-        return { text, truncated, duration: Date.now() - started };
-      },
-      async healthy(): Promise<boolean> {
-        return true;
+        return { text };
       },
       async close(): Promise<void> {},
     };
   }
 
   async close(): Promise<void> {}
-
-  capabilities(): ProviderCapabilities {
-    return {
-      maxMessageChars: 1_000_000,
-      supportsStreaming: true,
-      supportsSystemPrompt: true,
-    };
-  }
 }
 
 async function postChat(
   config: ProxyConfig,
   messages: ChatMessage[],
   options: ChatTurnOptions,
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<string> {
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const stream = Boolean(options.onUpdate);
   const controller = new AbortController();
@@ -92,13 +78,7 @@ async function postChat(
     });
   } catch (error: unknown) {
     clearTimeout(timer);
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Proxy request timed out after ${timeoutMs}ms at ${url}`);
-    }
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Failed to reach proxy at ${url}: ${detail}. Is teams-copilot-proxy running?`,
-    );
+    throw describeFetchError(error, url, timeoutMs);
   }
 
   try {
@@ -110,23 +90,31 @@ async function postChat(
       return await readStream(response.body, options.onUpdate);
     }
     const json = (await response.json()) as ChatCompletionResponse;
-    const choice = json.choices?.[0];
-    const text = choice?.message?.content ?? '';
-    return { text, truncated: choice?.finish_reason === 'length' };
+    return json.choices?.[0]?.message?.content ?? '';
+  } catch (error: unknown) {
+    if (error instanceof Error && (error.message.startsWith('Proxy request failed'))) throw error;
+    throw describeFetchError(error, url, timeoutMs);
   } finally {
     clearTimeout(timer);
   }
 }
 
+function describeFetchError(error: unknown, url: string, timeoutMs: number): Error {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return new Error(`Proxy request timed out after ${timeoutMs}ms at ${url}`);
+  }
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`Failed to reach proxy at ${url}: ${detail}. Is teams-copilot-proxy running?`);
+}
+
 async function readStream(
   body: ReadableStream<Uint8Array>,
   onUpdate?: (chunk: string) => void,
-): Promise<{ text: string; truncated: boolean }> {
+): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let full = '';
-  let truncated = false;
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim();
@@ -139,13 +127,11 @@ async function readStream(
     } catch {
       return;
     }
-    const choice = json.choices?.[0];
-    const delta = choice?.delta?.content ?? '';
+    const delta = json.choices?.[0]?.delta?.content ?? '';
     if (delta) {
       full += delta;
       onUpdate?.(delta);
     }
-    if (choice?.finish_reason === 'length') truncated = true;
   };
 
   for (;;) {
@@ -157,5 +143,5 @@ async function readStream(
     for (const line of lines) handleLine(line);
   }
   if (buffer) handleLine(buffer);
-  return { text: full, truncated };
+  return full;
 }

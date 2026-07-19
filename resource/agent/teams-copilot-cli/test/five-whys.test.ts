@@ -1,10 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { describe, expect, it } from 'vitest';
 import { MockProvider } from '../src/provider/mock.js';
-import { FiveWhysSession, saveSummary, type FiveWhysIO } from '../src/five-whys/session.js';
-import { FORCE_SUMMARY_DIRECTIVE, SUMMARY_SENTINEL, stripSentinel } from '../src/five-whys/prompt.js';
+import { FiveWhysSession, type FiveWhysIO } from '../src/five-whys/session.js';
+import { FORCE_SUMMARY_DIRECTIVE, SUMMARY_SENTINEL } from '../src/five-whys/prompt.js';
 
 interface RecordedTurn {
   text: string;
@@ -30,13 +27,6 @@ function scriptedIO(answers: string[], confirm = true): FiveWhysIO & { turns: Re
     },
   };
 }
-
-const tempFiles: string[] = [];
-afterEach(() => {
-  for (const f of tempFiles.splice(0)) {
-    if (existsSync(f)) unlinkSync(f);
-  }
-});
 
 describe('FiveWhysSession', () => {
   it('asks one question per turn and stops when the assistant converges', async () => {
@@ -109,16 +99,5 @@ describe('FiveWhysSession', () => {
     };
     await new FiveWhysSession(provider).run('problem', io);
     expect(chunks.join('')).toContain('Root cause: z');
-  });
-});
-
-describe('saveSummary', () => {
-  it('writes the summary as Markdown with a trailing newline', () => {
-    const path = join(tmpdir(), `five-whys-${Date.now()}.md`);
-    tempFiles.push(path);
-    saveSummary(path, stripSentinel(`${SUMMARY_SENTINEL}\nRoot cause: cache`));
-    const content = readFileSync(path, 'utf8');
-    expect(content).toBe('Root cause: cache\n');
-    expect(content).not.toContain(SUMMARY_SENTINEL);
   });
 });

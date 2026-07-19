@@ -1,4 +1,3 @@
-import { writeFileSync } from 'fs';
 import type { ChatSession, Provider } from '../provider/types.js';
 import {
   FORCE_SUMMARY_DIRECTIVE,
@@ -77,10 +76,4 @@ export class FiveWhysSession {
   private turnOptions(io: FiveWhysIO): { onUpdate?: (chunk: string) => void } {
     return io.onDelta ? { onUpdate: io.onDelta } : {};
   }
-}
-
-/** Writes the final summary to disk as Markdown. */
-export function saveSummary(path: string, summary: string): void {
-  const body = summary.endsWith('\n') ? summary : `${summary}\n`;
-  writeFileSync(path, body, 'utf8');
 }

@@ -39,8 +39,8 @@ afterEach(async () => {
   }
 });
 
-function jsonReply(content: string, finishReason = 'stop'): string {
-  return JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }] });
+function jsonReply(content: string): string {
+  return JSON.stringify({ choices: [{ message: { content } }] });
 }
 
 describe('ProxyProvider', () => {
@@ -54,7 +54,6 @@ describe('ProxyProvider', () => {
     const result = await session.send('the build broke');
 
     expect(result.text).toBe('why did it fail?');
-    expect(result.truncated).toBe(false);
     const { body } = captured[0];
     expect(body.model).toBe('m365-copilot');
     expect('tools' in body).toBe(false);

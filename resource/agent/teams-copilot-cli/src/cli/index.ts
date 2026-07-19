@@ -8,7 +8,7 @@ const program = new Command();
 program
   .name('tcc')
   .description('Guided 5 Whys root-cause analysis via teams-copilot-proxy')
-  .version('2.0.3')
+  .version('3.0.0')
   .argument('<problem...>', 'The problem to analyze; use "tcc @" to enter multiline input')
   .option('--config <path>', 'Path to config.yaml')
   .option('-o, --output <path>', 'Save the final summary to a Markdown file')

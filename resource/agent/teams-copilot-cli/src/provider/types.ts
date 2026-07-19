@@ -5,22 +5,6 @@ export interface ChatTurnOptions {
 
 export interface ChatTurnResult {
   text: string;
-  truncated: boolean;
-  duration: number;
-}
-
-export interface ChatSession {
-  /** Send one message in the same conversation context (with auto-continuation). */
-  send(message: string, options?: ChatTurnOptions): Promise<ChatTurnResult>;
-  /** Whether the session is still healthy (login state, page/connection alive). */
-  healthy(): Promise<boolean>;
-  close(): Promise<void>;
-}
-
-export interface ProviderCapabilities {
-  maxMessageChars: number;
-  supportsStreaming: boolean;
-  supportsSystemPrompt: boolean;
 }
 
 export interface CreateSessionOptions {
@@ -28,10 +12,15 @@ export interface CreateSessionOptions {
   systemPrompt?: string;
 }
 
+export interface ChatSession {
+  /** Send one message in the same conversation context. */
+  send(message: string, options?: ChatTurnOptions): Promise<ChatTurnResult>;
+  close(): Promise<void>;
+}
+
 export interface Provider {
   readonly id: string;
   init(): Promise<void>;
   createSession(options?: CreateSessionOptions): Promise<ChatSession>;
   close(): Promise<void>;
-  capabilities(): ProviderCapabilities;
 }

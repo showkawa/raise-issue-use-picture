@@ -1,6 +1,6 @@
 {
   "name": "teams-copilot-cli",
-  "version": "2.0.3",
+  "version": "3.0.0",
   "description": "tcc — a guided 5 Whys root-cause analysis CLI backed by teams-copilot-proxy",
   "type": "module",
   "bin": {
