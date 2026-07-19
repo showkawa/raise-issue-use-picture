@@ -136,24 +136,6 @@ model_provider = "teams-copilot"
 
 `env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=dummy`). Then run `codex --profile m365`.
 
-### Continue
-
-Add this to `%USERPROFILE%\.continue\config.json`:
-
-```json
-{
-  "models": [
-    {
-      "title": "M365 Copilot",
-      "provider": "openai",
-      "model": "m365-copilot:persist",
-      "apiBase": "http://127.0.0.1:8000/v1",
-      "apiKey": "dummy"
-    }
-  ]
-}
-```
-
 ## Persistent Sessions
 
 By default, requests are stateless from the Copilot side.
