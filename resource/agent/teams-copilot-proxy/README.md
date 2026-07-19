@@ -6,14 +6,34 @@ This project runs a local FastAPI proxy that talks to the same `substrate.office
 
 No Azure app registration. No admin consent. Sign in with your normal M365 Copilot browser session.
 
-## Why Use This
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Connect a Client](#connect-a-client)
+  - [OpenCode](#opencode)
+  - [Codex CLI](#codex-cli)
+- [Persistent Sessions](#persistent-sessions)
+- [Examples](#examples)
+- [Token Management](#token-management)
+  - [Refresh](#refresh)
+  - [Manual Fallback](#manual-fallback)
+  - [Health](#health)
+- [API Endpoints](#api-endpoints)
+- [Environment Variables](#environment-variables)
+- [Security Notes](#security-notes)
+- [Limitations](#limitations)
+- [Token Automation Details](#token-automation-details)
+- [License](#license)
+
+## Features
 
 - Use M365 Copilot from OpenAI-compatible clients
 - Works with your existing signed-in Copilot web session
 - Runs locally on `127.0.0.1` by default
 - Auto-captures and refreshes the short-lived browser token
 - Supports persistent Copilot sessions across turns
-- Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages style requests
+- Supports OpenAI Chat Completions and OpenAI Responses style requests
 - Emulated tool calling on `/v1/chat/completions`, so agentic clients like OpenCode can read files, run commands, and edit code
 
 ## Quick Start
@@ -23,23 +43,19 @@ uv sync
 uv run teams-copilot-proxy serve
 ```
 
-The server starts at:
+The server starts at `http://127.0.0.1:8000`.
+
+On first run, the proxy opens a dedicated Chrome window. Sign in to M365 Copilot there once. The proxy will capture the required Substrate token and write it to `.env`.
+
+The dedicated Chrome profile is stored at:
 
 ```text
-http://127.0.0.1:8000
-```
-
-On first run, the proxy opens a dedicated Edge window. Sign in to M365 Copilot there once. The proxy will capture the required Substrate token and write it to `.env`.
-
-The dedicated Edge profile is stored at:
-
-```text
-%USERPROFILE%\.teams-copilot-proxy\edge-profile
+%USERPROFILE%\.teams-copilot-proxy\chrome-profile
 ```
 
 If startup says it is waiting for a token, click the Copilot message box and type one character. You do not need to send the message.
 
-## Test It
+Verify it works:
 
 ```bat
 curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
@@ -47,14 +63,14 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
   -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}]}"
 ```
 
-## Connect A Client
+## Connect a Client
 
 Use these settings for any OpenAI-compatible client:
 
 | Setting | Value |
 |---|---|
 | Base URL | `http://127.0.0.1:8000/v1` |
-| API Key | `dummy` |
+| API Key | `unused` |
 | Model | `m365-copilot` |
 | Persistent model | `m365-copilot:persist` |
 
@@ -100,19 +116,15 @@ For a quick non-agentic chat setup instead, point OpenCode's built-in OpenAI pro
 
 ```bat
 set OPENAI_BASE_URL=http://127.0.0.1:8000
-set OPENAI_API_KEY=dummy
+set OPENAI_API_KEY=unused
 opencode
 ```
 
-For persistent Copilot-side conversation memory, use the model:
+For persistent Copilot-side conversation memory, use the model `m365-copilot:persist`.
 
-```text
-m365-copilot:persist
-```
+**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
 
-Tool calling: when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
-
-System prompt on tool turns: OpenCode's built-in system prompt is written for native function calling and makes the Copilot browser channel refuse in prose ("I can't access your local files") instead of emitting a tool call. So when `tools` are present the proxy drops the client system prompt and lets the tool protocol be the only authoritative instruction (`M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS`, default on). To restore forwarding the full system prompt, set `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=false`.
+**System prompt on tool turns:** OpenCode's built-in system prompt is written for native function calling and makes the Copilot browser channel refuse in prose ("I can't access your local files") instead of emitting a tool call. So when `tools` are present the proxy drops the client system prompt and lets the tool protocol be the only authoritative instruction (`M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS`, default on). To restore forwarding the full system prompt, set `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=false`.
 
 For a ready-to-use project-level config and the full loop mapping, see [examples/opencode.json](examples/opencode.json) and [docs/opencode-integration.md](docs/opencode-integration.md).
 
@@ -134,49 +146,52 @@ model = "m365-copilot"
 model_provider = "teams-copilot"
 ```
 
-`env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=dummy`). Then run `codex --profile m365`.
-
-### Continue
-
-Add this to `%USERPROFILE%\.continue\config.json`:
-
-```json
-{
-  "models": [
-    {
-      "title": "M365 Copilot",
-      "provider": "openai",
-      "model": "m365-copilot:persist",
-      "apiBase": "http://127.0.0.1:8000/v1",
-      "apiKey": "dummy"
-    }
-  ]
-}
-```
+`env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=unused`). Then run `codex --profile m365`.
 
 ## Persistent Sessions
 
-By default, requests are stateless from the Copilot side.
+By default, requests are stateless from the Copilot side, and this is the **recommended mode for agentic clients** like OpenCode: the client owns the conversation history and replays it every turn, so a stateless `m365-copilot` keeps history in a single source of truth. Persistent Copilot-side memory on top of a client that already resends history double-counts context and hits Copilot's input limit sooner — do not use it for tool/loop workflows.
 
-To reuse the same Copilot conversation across turns, send a stable header:
+If you do want Copilot to keep its own memory across turns (e.g. a plain chat client that does *not* resend history), the **recommended** primitive is a stable per-conversation header:
 
 ```http
 X-M365-Session-Id: my-work-session
 ```
 
-Or use the model suffix:
+Each workspace or conversation should pick its own id. This keeps concurrent conversations isolated.
+
+The `m365-copilot:persist` model suffix is a convenience for clients that can only change the model name, not headers:
 
 ```text
 m365-copilot:persist
 ```
 
-Header mode is better when your client supports custom headers, because each workspace or coding-agent session can choose its own id. If your client only lets you change the model name, use `m365-copilot:persist`.
+**Caveat (do not rely on for concurrency):** without an `X-M365-Session-Id` header, `:persist` keys the session by the request `user` field, falling back to a single global `default` key when `user` is absent. That means multiple concurrent conversations using `:persist` share one Copilot session and cross-contaminate. Prefer the header. See the tracked limitation in [docs/tickets/05-persist-session-key-collision.md](docs/tickets/05-persist-session-key-collision.md).
 
-If a client uses `m365-copilot:persist` without sending a `user` field, all requests share one default persistent session until the proxy restarts.
+## Examples
 
-## Token Refresh
+**Streaming:**
 
-M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Edge window.
+```bat
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"m365-copilot\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+```
+
+**Persistent session:**
+
+```bat
+curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -H "X-M365-Session-Id: test1" ^
+  -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Remember this code word: sakura. Reply only OK.\"}]}"
+```
+
+## Token Management
+
+M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Chrome window.
+
+### Refresh
 
 Auto-refresh is on by default:
 
@@ -190,7 +205,7 @@ Useful controls:
 uv run teams-copilot-proxy serve --refresh-before-seconds 300
 uv run teams-copilot-proxy serve --no-auto-refresh
 uv run teams-copilot-proxy serve --no-capture-on-start
-uv run teams-copilot-proxy serve --no-launch-edge
+uv run teams-copilot-proxy serve --no-launch-chrome
 ```
 
 You can also press `r` in the server console to refresh the token manually.
@@ -203,7 +218,7 @@ uv run teams-copilot-proxy set-token
 
 Then paste a fresh Substrate WebSocket URL:
 
-1. Open the signed-in M365 Copilot Edge window.
+1. Open the signed-in M365 Copilot Chrome window.
 2. Open DevTools (`F12`) -> **Network** tab.
 3. Filter by `substrate`.
 4. Click the WebSocket entry.
@@ -212,7 +227,7 @@ Then paste a fresh Substrate WebSocket URL:
 
 The command extracts `access_token` automatically and writes it to `.env`.
 
-## Token Health
+### Health
 
 ```bat
 curl http://127.0.0.1:8000/healthz
@@ -241,42 +256,6 @@ Example:
 | `GET /v1/models` | OpenAI-compatible model list |
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming supported |
 | `POST /v1/responses` | OpenAI Responses API, streaming supported |
-| `POST /v1/messages` | Anthropic Messages API style endpoint |
-
-## More Examples
-
-### Streaming
-
-```bat
-curl -N -X POST http://127.0.0.1:8000/v1/chat/completions ^
-  -H "Content-Type: application/json" ^
-  -d "{\"model\":\"m365-copilot\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
-```
-
-### Persistent Session
-
-```bat
-curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
-  -H "Content-Type: application/json" ^
-  -H "X-M365-Session-Id: test1" ^
-  -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Remember this code word: sakura. Reply only OK.\"}]}"
-```
-
-### Anthropic-Style Messages
-
-```bat
-curl -X POST http://127.0.0.1:8000/v1/messages ^
-  -H "Content-Type: application/json" ^
-  -d "{\"model\":\"m365-copilot\",\"system\":\"Be concise.\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
-```
-
-## Security Notes
-
-- The proxy listens on `127.0.0.1` by default.
-- The browser token is stored locally in `.env`.
-- `.env`, `.venv/`, and Python cache files are ignored by Git.
-- The proxy does not send your token to any external service besides Microsoft 365 Copilot's own `substrate.office.com` endpoint.
-- Anyone who can read your `.env` can use the token until it expires. Treat it like a secret.
 
 ## Environment Variables
 
@@ -293,24 +272,26 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` | `true` | Optional. When on, drops the client (e.g. OpenCode) system prompt on requests that carry `tools`, so the Copilot browser channel emits a tool call instead of refusing in prose. Set to `false` to forward the full system prompt on tool turns. Requests without tools are unaffected. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 
+## Security Notes
+
+- The proxy listens on `127.0.0.1` by default.
+- The browser token is stored locally in `.env`.
+- `.env`, `.venv/`, and Python cache files are ignored by Git.
+- The proxy does not send your token to any external service besides Microsoft 365 Copilot's own `substrate.office.com` endpoint.
+- Anyone who can read your `.env` can use the token until it expires. Treat it like a secret.
+
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
-- Token refresh depends on a signed-in Edge profile.
-- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` and `/v1/messages` do not support tools yet.
+- Token refresh depends on a signed-in Chrome profile.
+- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` does not support tools yet.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
+
+## Token Automation Details
+
+See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the deeper Chrome CDP refresh notes and alternatives.
 
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-
-## Token Automation Details
-
-See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the deeper Edge CDP refresh notes and alternatives.
-
-## Support
-
-If this project saves you time, please consider giving it a GitHub star. It helps other people find the repo.
-
-[![Star History Chart](https://api.star-history.com/svg?repos=kuchris/m365-copilot-openai-proxy&type=Date)](https://www.star-history.com/#kuchris/m365-copilot-openai-proxy&Date)

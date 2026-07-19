@@ -5,7 +5,9 @@ import asyncio
 import json
 import logging
 import msvcrt
+import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -186,12 +188,12 @@ def _needs_substrate_token(token: str | None) -> bool:
 
 
 def _startup_capture_loop(cdp_port: int, timeout_seconds: int) -> None:
-    print("Waiting for the debug Edge M365 tab...")
+    print("Waiting for the debug Chrome M365 tab...")
     _wait_for_m365_page(cdp_port, min(timeout_seconds, 30))
-    print("Trying to refresh Substrate token from the debug Edge tab...")
+    print("Trying to refresh Substrate token from the debug Chrome tab...")
     if _try_auto_refresh(cdp_port):
         return
-    print("Waiting for a Substrate token from the debug Edge M365 Copilot tab...")
+    print("Waiting for a Substrate token from the debug Chrome M365 Copilot tab...")
     print("If needed: press F5 in Copilot, click the message box, and type one character.")
     if _capture_token_to_env(cdp_port, timeout_seconds):
         print(".env updated with Substrate token.")
@@ -300,7 +302,7 @@ def _auto_refresh_loop(
             stop_event.wait(wait_seconds)
             continue
 
-        print(f"Token expires in {max(remaining, 0)} seconds; refreshing from Edge...")
+        print(f"Token expires in {max(remaining, 0)} seconds; refreshing from Chrome...")
         if not _try_auto_refresh(cdp_port):
             print("Auto-refresh failed; will retry later.")
         stop_event.wait(retry_seconds)
@@ -330,16 +332,16 @@ def main() -> None:
     capture_parser.add_argument("--timeout-seconds", type=int, default=60)
     capture_parser.set_defaults(func=capture_token_command)
 
-    launch_parser = subparsers.add_parser("launch-edge")
+    launch_parser = subparsers.add_parser("launch-chrome")
     launch_parser.add_argument("--cdp-port", type=int, default=9222)
-    launch_parser.set_defaults(func=launch_edge_command)
+    launch_parser.set_defaults(func=launch_chrome_command)
 
     serve_parser = subparsers.add_parser("serve")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--cdp-port", type=int, default=9222)
     serve_parser.add_argument("--no-auto-refresh", action="store_true")
-    serve_parser.add_argument("--no-launch-edge", action="store_true")
+    serve_parser.add_argument("--no-launch-chrome", action="store_true")
     serve_parser.add_argument("--no-capture-on-start", action="store_true")
     serve_parser.add_argument("--capture-timeout-seconds", type=int, default=180)
     serve_parser.add_argument("--refresh-before-seconds", type=int, default=300)
@@ -350,22 +352,42 @@ def main() -> None:
     args.func(args)
 
 
-def launch_edge_command(args: argparse.Namespace) -> None:
-    _launch_debug_edge(args.cdp_port)
+def launch_chrome_command(args: argparse.Namespace) -> None:
+    _launch_debug_chrome(args.cdp_port)
 
 
-def _launch_debug_edge(cdp_port: int) -> None:
-    profile_dir = Path.home() / ".teams-copilot-proxy" / "edge-profile"
+def _find_chrome() -> str | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
+        / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+        / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("chrome") or shutil.which("chrome.exe")
+
+
+def _launch_debug_chrome(cdp_port: int) -> None:
+    profile_dir = Path.home() / ".teams-copilot-proxy" / "chrome-profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
+    chrome_exe = _find_chrome()
+    if not chrome_exe:
+        print("Chrome not found. Install Google Chrome, or launch it manually with ")
+        print(f"  chrome --remote-debugging-port={cdp_port} --user-data-dir={profile_dir}")
+        return
     subprocess.Popen([
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        chrome_exe,
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "https://m365.cloud.microsoft/chat",
     ])
-    print(f"Edge launched with remote debugging on port {cdp_port}.")
-    print(f"Dedicated Edge profile: {profile_dir}")
+    print(f"Chrome launched with remote debugging on port {cdp_port}.")
+    print(f"Dedicated Chrome profile: {profile_dir}")
     print("Sign in to M365 Copilot in that window once, then retry refresh.")
 
 
@@ -387,7 +409,7 @@ def set_token_command(_args) -> None:
 
 def capture_token_command(args: argparse.Namespace) -> None:
     print("Listening for a Substrate WebSocket token...")
-    print("In the debug Edge M365 Copilot tab, click the message box and type one character. Do not need to send.")
+    print("In the debug Chrome M365 Copilot tab, click the message box and type one character. Do not need to send.")
     token = asyncio.run(_cdp_capture_websocket_token(args.cdp_port, args.timeout_seconds))
     if not token:
         print("Error: no Substrate WebSocket token captured before timeout.")
@@ -406,8 +428,8 @@ def serve_command(args: argparse.Namespace) -> None:
         auto_refresh_thread = None
         capture_thread = None
 
-        if not args.no_launch_edge:
-            _launch_debug_edge(cdp_port)
+        if not args.no_launch_chrome:
+            _launch_debug_chrome(cdp_port)
 
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
@@ -465,7 +487,7 @@ def serve_command(args: argparse.Namespace) -> None:
         if action == "refresh":
             print("Refreshing token...")
             if not _try_auto_refresh(cdp_port):
-                print("Auto-refresh failed (Edge not running with --remote-debugging-port).")
+                print("Auto-refresh failed (Chrome not running with --remote-debugging-port).")
                 print("Falling back to manual mode.")
                 set_token_command(None)
             print("Restarting server...")
