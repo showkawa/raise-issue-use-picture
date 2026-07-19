@@ -116,7 +116,7 @@ For a ready-to-use project-level config and the full loop mapping, see [examples
 
 ### Codex CLI
 
-Codex CLI defaults to the Responses API, which does not support tools on this proxy yet. Point it at the Chat Completions endpoint instead by setting `wire_api = "chat"` in its provider config, with base URL `http://127.0.0.1:8000/v1` and any API key.
+Tool calling works with Codex CLI, but only over the Chat Completions wire API. This proxy emulates tool calls on `/v1/chat/completions` only; its `/v1/responses` endpoint returns plain text with no tool support. Since Codex defaults to the Responses API, you must set `wire_api = "chat"` in its provider config (base URL `http://127.0.0.1:8000/v1`, any API key) so tools are routed through the tool-capable endpoint. Left on the default Responses API, Codex gets no tool calling.
 
 Add a custom provider to `%USERPROFILE%\.codex\config.toml`:
 
