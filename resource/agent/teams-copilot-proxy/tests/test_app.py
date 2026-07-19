@@ -345,6 +345,23 @@ def test_openai_persistent_model_suffix_uses_user_as_session_key() -> None:
     assert fake.sessions[0] is not fake.sessions[2]
 
 
+def test_persist_suffix_without_id_falls_back_to_stateless() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+
+    for _ in range(2):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m365-copilot:persist",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+        assert response.status_code == 200
+
+    assert fake.sessions == [None, None]
+
+
 def test_persistent_session_turn_flags_are_reserved_in_order() -> None:
     session = PersistentSessionStore().get("work")
 

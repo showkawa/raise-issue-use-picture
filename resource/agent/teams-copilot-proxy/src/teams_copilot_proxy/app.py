@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -23,6 +24,8 @@ from .tool_protocol import (
 )
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
 
+logger = logging.getLogger(__name__)
+
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"
 
@@ -36,6 +39,7 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.token_store = AccessTokenStore(resolved_settings.access_token)
     app.state.session_store = PersistentSessionStore()
+    app.state.warned_persist_without_id = False
     app.state.copilot_client_factory = copilot_client_factory or (
         lambda: SubstrateCopilotClient(
             app.state.token_store.get(),
@@ -238,7 +242,19 @@ def _persistent_session(
     if header_key:
         return app.state.session_store.get(f"header:{header_key}")
     if model.endswith(_PERSIST_MODEL_SUFFIX):
-        return app.state.session_store.get(f"model:{fallback_key or 'default'}")
+        user_key = (fallback_key or "").strip()
+        if user_key:
+            return app.state.session_store.get(f"model:{user_key}")
+        if not app.state.warned_persist_without_id:
+            app.state.warned_persist_without_id = True
+            logger.warning(
+                "':persist' used without an %s header or a 'user' field; falling back to a "
+                "stateless request to avoid sharing one global Copilot session across "
+                "conversations. Set an %s header for per-conversation memory.",
+                _SESSION_ID_HEADER,
+                _SESSION_ID_HEADER,
+            )
+        return None
     return None
 
 

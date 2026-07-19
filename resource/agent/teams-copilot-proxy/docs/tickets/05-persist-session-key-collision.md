@@ -12,9 +12,9 @@ independent conversations never land on the same Copilot session by accident.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** open
+**Status:** done
 
-- [ ] `:persist` without an explicit session id no longer collapses to a single shared global key; concurrent conversations get isolated sessions (e.g. derive a stable per-connection/per-conversation key, or require an explicit id and error clearly otherwise).
-- [ ] The `X-M365-Session-Id` header remains the primary, documented persistence primitive and takes precedence over the suffix.
-- [ ] Behavior is covered at the HTTP seam: two requests representing distinct conversations using `:persist` must not observe each other's session state.
-- [ ] README "Persistent Sessions" and `docs/opencode-integration.md` stay consistent with the final behavior.
+- [x] `:persist` without an explicit session id no longer collapses to a single shared global key; it now falls back to a stateless request (with a one-time warning) instead of sharing one Copilot session. (`app._persistent_session`)
+- [x] The `X-M365-Session-Id` header remains the primary, documented persistence primitive and takes precedence over the suffix; a `user` field still keys a per-user session.
+- [x] Behavior is covered at the HTTP seam: two `:persist` requests without an id both receive `session=None` (no shared session). (`test_persist_suffix_without_id_falls_back_to_stateless`)
+- [x] README "Persistent Sessions" and `docs/opencode-integration.md` stay consistent with the final behavior.
