@@ -92,6 +92,8 @@ Recommended: drop a project-level `opencode.json` in your repo root. It declares
 
 Then run `opencode` in that project and pick **M365 Copilot** under the **Teams Copilot Proxy** provider. The same file lives at [examples/opencode.json](examples/opencode.json).
 
+To apply the same provider to every project instead of per-repo, put the identical JSON in the global config file at `C:\Users\{username}\.config\opencode\opencode.json` (on macOS/Linux: `~/.config/opencode/opencode.json`). A project-level `opencode.json` in the repo root overrides the global one when both exist.
+
 `limit.context` (`128000`) is a placeholder; Copilot's real input limit depends on your tenant and should be measured against a live session, then backfilled here.
 
 For a quick non-agentic chat setup instead, point OpenCode's built-in OpenAI provider at the proxy:
