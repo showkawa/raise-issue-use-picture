@@ -1,7 +1,7 @@
-import { loadConfig } from '../provider/copilot-web/config.js';
+import { loadConfig } from '../config.js';
 import { createProvider } from '../provider/factory.js';
 import { FiveWhysSession } from '../five-whys/session.js';
-import { writeTextOutput } from './prompt-content.js';
+import { writeTextOutput } from './input.js';
 import { TerminalIO } from './terminal-io.js';
 
 export interface FiveWhysCommandOpts {

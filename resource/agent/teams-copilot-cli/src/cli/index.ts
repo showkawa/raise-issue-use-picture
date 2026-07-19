@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { readDelimitedQuestion } from './prompt-content.js';
+import { readDelimitedQuestion } from './input.js';
 import { runFiveWhys } from './five-whys-command.js';
 
 const program = new Command();
