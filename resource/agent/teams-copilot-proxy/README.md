@@ -70,7 +70,7 @@ Use these settings for any OpenAI-compatible client:
 | Setting | Value |
 |---|---|
 | Base URL | `http://127.0.0.1:8000/v1` |
-| API Key | `dummy` |
+| API Key | `unused` |
 | Model | `m365-copilot` |
 | Persistent model | `m365-copilot:persist` |
 
@@ -116,7 +116,7 @@ For a quick non-agentic chat setup instead, point OpenCode's built-in OpenAI pro
 
 ```bat
 set OPENAI_BASE_URL=http://127.0.0.1:8000
-set OPENAI_API_KEY=dummy
+set OPENAI_API_KEY=unused
 opencode
 ```
 
@@ -146,7 +146,7 @@ model = "m365-copilot"
 model_provider = "teams-copilot"
 ```
 
-`env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=dummy`). Then run `codex --profile m365`.
+`env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=unused`). Then run `codex --profile m365`.
 
 ## Persistent Sessions
 
