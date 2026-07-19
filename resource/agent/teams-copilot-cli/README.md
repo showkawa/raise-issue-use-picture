@@ -1,139 +1,123 @@
-# Microsoft 365 Copilot CLI
+# teams-copilot-cli (`tcc`)
 
-Command-line helper that drives Microsoft 365 Copilot Chat at `https://m365.cloud.microsoft/chat` through a local Chrome/Chromium browser via Playwright CDP.
+A single-command **5 Whys** root-cause analysis assistant. Give it a problem and
+it runs an interactive, facilitator-style dialogue — asking one focused "why" at
+a time — until it converges on a root cause and proposes countermeasures.
 
-## Requirements
+Answers come from Microsoft 365 Copilot through a local
+[`teams-copilot-proxy`](#prerequisite-the-proxy) that exposes an
+OpenAI-compatible API. `tcc` does **not** read your files, run commands, or act
+as a coding agent — it only has a conversation.
 
-- Node.js 20+
-- Google Chrome, Microsoft Edge, or Chromium
-- A Microsoft 365 account with Copilot Chat access
-
-The CLI does not manage Microsoft authentication. It reuses the browser profile configured in `browser.userDataDir`; sign in to Microsoft 365 Copilot in that profile before running generation commands. If the configured CDP port already belongs to a browser with an open Copilot Chat tab, the CLI reuses that tab without navigating away from the conversation.
-
-## Install and build
+## Install
 
 ```bash
 npm install
 npm run build
+npm link      # optional: puts `tcc` (and the `teams-copilot` alias) on your PATH
 ```
 
-Run from source:
+Requires Node.js >= 20.
+
+## Prerequisite: the proxy
+
+`tcc` needs a running `teams-copilot-proxy` that speaks the OpenAI
+`/v1/chat/completions` protocol and forwards to Microsoft 365 Copilot. By
+default `tcc` expects it at:
+
+| Setting  | Default                       |
+| -------- | ----------------------------- |
+| base URL | `http://127.0.0.1:8000/v1`    |
+| model    | `m365-copilot`                |
+| API key  | `unused` (the proxy ignores it) |
+
+Start the proxy first; if it is unreachable, `tcc` prints a clear error.
+
+## Usage
 
 ```bash
-node dist/cli/index.js ask "Summarize this project"
+# Inline problem statement
+tcc "our nightly deploy failed again"
+
+# Multiline problem: type it, then a single @ on its own line to finish
+tcc @
+
+# Save the final summary as Markdown
+tcc "checkout conversion dropped 20%" -o rca.md
+
+# Print each answer at once instead of streaming it
+tcc "the build is flaky" --no-stream
+
+# Point at a non-default proxy / model
+tcc "latency spiked" --config ./config.yaml
 ```
 
-When installed as a package, use:
+Options:
 
-```bash
-tcc "Summarize this project"
+| Flag              | Description                                             |
+| ----------------- | ------------------------------------------------------- |
+| `-o, --output`    | Save the final summary to a Markdown file               |
+| `--no-stream`     | Print each answer whole instead of streaming tokens     |
+| `--config <path>` | Path to a `config.yaml` (defaults to `./config.yaml`)   |
+
+During the dialogue, type your answer and press Enter. Enter `q`, `/stop`,
+`/quit`, or `/exit` (or send EOF) to stop early — `tcc` will then ask Copilot to
+produce the final summary from the conversation so far. After about five levels
+it offers to keep going deeper.
+
+## Example session
+
 ```
+$ tcc "customers are getting 500s on checkout"
 
-`tcc <question>` is shorthand for `tcc ask <question>`. The previous
-`teams-copilot` executable remains available as a compatibility alias.
+Why are customers getting 500s on checkout?
+> the payment service is timing out
+
+Why is the payment service timing out?
+> it can't open new DB connections
+
+Why can't it open new DB connections?
+> the connection pool is exhausted
+
+Why is the connection pool exhausted?
+> a batch job holds connections for minutes
+
+Why does the batch job hold connections that long?
+> it runs a full-table scan inside one transaction
+
+Problem: Customers get 500s on checkout.
+Why chain:
+  1. Checkout 500s  -> payment service times out
+  2. Times out      -> cannot open new DB connections
+  3. Can't connect  -> connection pool exhausted
+  4. Pool exhausted -> a batch job holds connections for minutes
+  5. Long hold      -> full-table scan inside a single transaction
+Root cause: A batch job runs an unindexed full-table scan in one long
+transaction, monopolizing the DB connection pool.
+Countermeasures:
+  - Add the missing index and batch the job into smaller transactions.
+  - Cap batch-job pool usage on a separate connection pool.
+  - Add pool-saturation alerts and a payment-service timeout budget.
+```
 
 ## Configuration
 
-The CLI reads `config.yaml` from the current working directory unless `--config <path>` is provided. If no browser path is configured, it checks `TEAMS_COPILOT_BROWSER` and common Edge/Chrome/Chromium install paths.
+All settings are optional and fall back to the defaults above. Copy
+`config.example.yaml` to `config.yaml` (or pass `--config`) to override:
 
-`copilot.copilotUrl` defaults to `https://m365.cloud.microsoft/chat`. Legacy v1 config files using `edge.executablePath`, `edge.debuggingPort`, and `copilot.inputSelector` are still accepted.
+```yaml
+provider: "proxy"          # proxy | mock (mock is for tests only)
+proxy:
+  baseUrl: "http://127.0.0.1:8000/v1"
+  model: "m365-copilot"
+  apiKey: "unused"
+  timeoutMs: 120000
+```
 
-`copilot.responseMode` controls how replies are read:
-
-- `auto` (default): read Microsoft 365 Copilot SignalR/WebSocket updates from the browser session, then fall back to DOM polling if no protocol response is captured.
-- `signalr`: require SignalR/WebSocket response capture.
-- `dom`: use DOM polling only.
-
-`copilot.requestMode` controls how prompts are submitted:
-
-- `auto` (default): install an in-page WebSocket bridge. The first request after a page load uses the editor and captures the browser's authenticated SignalR request template; later requests use that template directly inside the page.
-- `browser-api`: require an already-captured in-page request template.
-- `dom`: always use the editor and send button.
-
-The authenticated WebSocket URL and request template remain in page memory. The CLI does not print, persist, or copy Microsoft tokens or cookies into Node configuration.
-
-## Commands
+## Development
 
 ```bash
-tcc "Question"
-tcc ask "Question"
-tcc ask "Explain this code" --file ./src/example.ts
-tcc ask "Explain this code" -f ./src/example.ts -o ./answer.md
-tcc review ./src/example.ts
-tcc prd "Project Name"
-tcc arch "Project Name"
-tcc tasks "Project Name"
-tcc repl
+npm run typecheck   # tsc --noEmit
+npm test            # vitest
+npm run build       # emit dist/
 ```
-
-`prd`, `arch`, and `tasks` write Markdown files to `output/`. `arch` requires `output/PRD.md`; `tasks` requires both `output/PRD.md` and `output/ARCH.md`.
-
-Use `--no-stream` to wait for the full response before printing.
-
-`tcc ask` writes status messages to stderr while it connects to the browser,
-opens Copilot, submits the prompt, and waits for a response. Long waits print
-an elapsed-time heartbeat every 15 seconds and include the configured timeout
-(120 seconds by default), so a stalled browser or Copilot request is visible
-without mixing diagnostics into the response on stdout.
-
-### Ask about code as inline text
-
-Enter a multiline prompt directly in either CMD or Git Bash. Run `tcc @`,
-paste any text or code, then finish with `@` on its own line:
-
-```text
-tcc @
-Explain the following TypeScript:
-import { writeFileSync } from 'fs';
-const message = `cost: "$5"`;
-@
-```
-
-The CLI reads all lines after `tcc @` itself, so quotes, dollar signs,
-backticks, redirects, and other shell-sensitive characters are preserved.
-Only a line containing exactly `@` ends the prompt.
-
-Let the CLI read a local text file and append it to the question as a fenced Markdown code block:
-
-```bash
-tcc ask "Explain what this code does" --file ./src/example.ts
-tcc ask "Explain what this code does" -f ./src/example.ts
-tcc ask "Find correctness issues" --file ./src/example.ts --language typescript
-```
-
-Pipe text without creating a file. `ask` automatically reads non-empty stdin, so `--stdin` is optional for pipelines:
-
-```bash
-tcc ask "Explain this code" --language typescript < ./src/example.ts
-cat ./src/example.ts | tcc ask "Explain this code" --language typescript
-tcc ask "Explain this code" --stdin --language typescript <<'CODE'
-const value = 1;
-console.log(value);
-CODE
-```
-
-The quoted heredoc delimiter prevents shell characters such as single quotes, backticks, and `<project-name>` from being interpreted by Bash. For large files, use `tcc review <file>` instead of inline text; Copilot prompt-length limits vary by tenant.
-
-Save the answer locally:
-
-```bash
-tcc ask "Explain this code" -f ./src/example.ts -o ./answer.md
-```
-
-### Review a local code file
-
-```bash
-tcc review ./src/example.ts
-tcc --no-stream review ./src/example.ts --output ./review.md
-tcc --no-stream review ./src/example.ts -o ./review.md
-```
-
-`review` uploads the file through the existing authenticated Copilot Chat page, asks Copilot for a Markdown code review, and prints the response. `--output` also saves the final report locally.
-
-The CLI uses Copilot's native file attachment flow. Extensions accepted by the page are uploaded directly. Other text code files, including `.ts`, are uploaded with a temporary `.txt` attachment name while preserving and identifying the original filename in the review prompt; the local source file is not renamed or modified. Binary files and empty files are rejected.
-
-Uploaded code is sent to Microsoft 365 Copilot and may be stored in the account's Copilot upload area. Review only files that the account is authorized to share.
-
-## Disclaimer
-
-This tool automates the Microsoft 365 Copilot web UI. Microsoft may change selectors, URLs, rate limits, or authentication behavior without notice. Use it only with accounts and workspaces you are authorized to access, and review generated documents before relying on them.

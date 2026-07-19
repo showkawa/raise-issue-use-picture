@@ -1,7 +1,7 @@
 {
   "name": "teams-copilot-cli",
-  "version": "2.0.3",
-  "description": "Microsoft 365 Copilot CLI — AI Coding assistant via browser automation",
+  "version": "3.0.0",
+  "description": "tcc — a guided 5 Whys root-cause analysis CLI backed by teams-copilot-proxy",
   "type": "module",
   "bin": {
     "tcc": "./dist/cli/index.js",
@@ -9,9 +9,7 @@
   },
   "files": [
     "dist",
-    "prompts",
     "README.md",
-    "OPERATION.md",
     "config.example.yaml"
   ],
   "engines": {
@@ -21,7 +19,6 @@
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "dev": "tsc --watch",
     "test": "node scripts/run-vitest.mjs run",
-    "test:e2e": "npm run build && playwright test",
     "test:watch": "node scripts/run-vitest.mjs",
     "start": "node dist/cli/index.js",
     "prepack": "npm run build",
@@ -30,11 +27,9 @@
   },
   "dependencies": {
     "commander": "^13.1.0",
-    "js-yaml": "^4.1.0",
-    "playwright-core": "^1.40.0"
+    "js-yaml": "^4.1.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
     "typescript": "^5.7.0",

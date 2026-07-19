@@ -1,28 +1,10 @@
-# Microsoft 365 Copilot CLI runtime configuration.
-# All fields are optional; browser.path can also be set with TEAMS_COPILOT_BROWSER.
-# browser:
-#   path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-#   port: 9222
-#   userDataDir: "C:\\teams-copilot-profile"
+# tcc runtime configuration. All fields are optional and fall back to the
+# defaults shown here. tcc talks to a running teams-copilot-proxy.
 
-copilot:
-  copilotUrl: "https://m365.cloud.microsoft/chat"
-  # auto: use the in-page browser API after a DOM request has captured its template.
-  # browser-api: require an already-captured in-page API template.
-  # dom: always submit through the page editor.
-  requestMode: "auto"
-  # auto: prefer browser SignalR frames for responses, then fall back to DOM.
-  # signalr: require browser SignalR response capture.
-  # dom: use DOM polling only.
-  responseMode: "auto"
-  selectors:
-    inputArea: "#m365-chat-editor-target-element, [role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Copilot\"], [role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"消息\"]"
-    sendButton: "button[type=\"submit\"][aria-label*=\"Send\"], button[type=\"submit\"][aria-label*=\"发送\"], button[aria-label*=\"Send message\"], button[aria-label*=\"发送消息\"]"
-    responseContainer: "[data-testid=\"lastChatMessage\"] [data-testid=\"markdown-reply\"], [data-testid=\"lastChatMessage\"], [data-testid=\"markdown-reply\"], [data-content=\"ai-message\"]"
-    loginIndicator: "input[type=\"email\"], input[name=\"loginfmt\"], input[type=\"password\"], input[name=\"passwd\"], [data-tid=\"sign-in-button\"]"
-    fileInput: "#upload-file-button, input[type=\"file\"]"
-  timeouts:
-    pageLoad: 30000
-    copilotLoad: 15000
-    streaming: 120000
-    pollingInterval: 500
+provider: "proxy"          # proxy | mock (mock is for tests only)
+
+proxy:
+  baseUrl: "http://127.0.0.1:8000/v1"
+  model: "m365-copilot"
+  apiKey: "unused"
+  timeoutMs: 120000

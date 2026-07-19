@@ -5,28 +5,22 @@ export interface ChatTurnOptions {
 
 export interface ChatTurnResult {
   text: string;
-  truncated: boolean;
-  duration: number;
+}
+
+export interface CreateSessionOptions {
+  /** Optional system persona seeded at the start of the conversation. */
+  systemPrompt?: string;
 }
 
 export interface ChatSession {
-  /** Send one message in the same conversation context (with auto-continuation). */
+  /** Send one message in the same conversation context. */
   send(message: string, options?: ChatTurnOptions): Promise<ChatTurnResult>;
-  /** Whether the session is still healthy (login state, page/connection alive). */
-  healthy(): Promise<boolean>;
   close(): Promise<void>;
-}
-
-export interface ProviderCapabilities {
-  maxMessageChars: number;
-  supportsStreaming: boolean;
-  supportsSystemPrompt: boolean;
 }
 
 export interface Provider {
   readonly id: string;
   init(): Promise<void>;
-  createSession(): Promise<ChatSession>;
+  createSession(options?: CreateSessionOptions): Promise<ChatSession>;
   close(): Promise<void>;
-  capabilities(): ProviderCapabilities;
 }
