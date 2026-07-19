@@ -92,6 +92,8 @@ Recommended: drop a project-level `opencode.json` in your repo root. It declares
 
 Then run `opencode` in that project and pick **M365 Copilot** under the **Teams Copilot Proxy** provider. The same file lives at [examples/opencode.json](examples/opencode.json).
 
+To apply the same provider to every project instead of per-repo, put the identical JSON in the global config file at `C:\Users\{username}\.config\opencode\opencode.json` (on macOS/Linux: `~/.config/opencode/opencode.json`). A project-level `opencode.json` in the repo root overrides the global one when both exist.
+
 `limit.context` (`128000`) is a placeholder; Copilot's real input limit depends on your tenant and should be measured against a live session, then backfilled here.
 
 For a quick non-agentic chat setup instead, point OpenCode's built-in OpenAI provider at the proxy:
@@ -116,7 +118,7 @@ For a ready-to-use project-level config and the full loop mapping, see [examples
 
 ### Codex CLI
 
-Codex CLI defaults to the Responses API, which does not support tools on this proxy yet. Point it at the Chat Completions endpoint instead by setting `wire_api = "chat"` in its provider config, with base URL `http://127.0.0.1:8000/v1` and any API key.
+Tool calling works with Codex CLI, but only over the Chat Completions wire API. This proxy emulates tool calls on `/v1/chat/completions` only; its `/v1/responses` endpoint returns plain text with no tool support. Since Codex defaults to the Responses API, you must set `wire_api = "chat"` in its provider config (base URL `http://127.0.0.1:8000/v1`, any API key) so tools are routed through the tool-capable endpoint. Left on the default Responses API, Codex gets no tool calling.
 
 Add a custom provider to `%USERPROFILE%\.codex\config.toml`:
 
