@@ -83,7 +83,7 @@ class SubstrateCopilotClient:
     def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo", proxy: str = ""):
         if not access_token:
             raise SubstrateCopilotError(
-                "M365_ACCESS_TOKEN is missing. Start the debug Edge window and let startup token capture complete, "
+                "M365_ACCESS_TOKEN is missing. Start the debug Chrome window and let startup token capture complete, "
                 "or run `uv run teams-copilot-proxy set-token`."
             )
         self._token = access_token

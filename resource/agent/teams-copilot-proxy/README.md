@@ -45,12 +45,12 @@ uv run teams-copilot-proxy serve
 
 The server starts at `http://127.0.0.1:8000`.
 
-On first run, the proxy opens a dedicated Edge window. Sign in to M365 Copilot there once. The proxy will capture the required Substrate token and write it to `.env`.
+On first run, the proxy opens a dedicated Chrome window. Sign in to M365 Copilot there once. The proxy will capture the required Substrate token and write it to `.env`.
 
-The dedicated Edge profile is stored at:
+The dedicated Chrome profile is stored at:
 
 ```text
-%USERPROFILE%\.teams-copilot-proxy\edge-profile
+%USERPROFILE%\.teams-copilot-proxy\chrome-profile
 ```
 
 If startup says it is waiting for a token, click the Copilot message box and type one character. You do not need to send the message.
@@ -189,7 +189,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
 
 ## Token Management
 
-M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Edge window.
+M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Chrome window.
 
 ### Refresh
 
@@ -205,7 +205,7 @@ Useful controls:
 uv run teams-copilot-proxy serve --refresh-before-seconds 300
 uv run teams-copilot-proxy serve --no-auto-refresh
 uv run teams-copilot-proxy serve --no-capture-on-start
-uv run teams-copilot-proxy serve --no-launch-edge
+uv run teams-copilot-proxy serve --no-launch-chrome
 ```
 
 You can also press `r` in the server console to refresh the token manually.
@@ -218,7 +218,7 @@ uv run teams-copilot-proxy set-token
 
 Then paste a fresh Substrate WebSocket URL:
 
-1. Open the signed-in M365 Copilot Edge window.
+1. Open the signed-in M365 Copilot Chrome window.
 2. Open DevTools (`F12`) -> **Network** tab.
 3. Filter by `substrate`.
 4. Click the WebSocket entry.
@@ -283,14 +283,14 @@ Most users only need `.env` after the proxy captures a token.
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
-- Token refresh depends on a signed-in Edge profile.
+- Token refresh depends on a signed-in Chrome profile.
 - Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` does not support tools yet.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
 
 ## Token Automation Details
 
-See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the deeper Edge CDP refresh notes and alternatives.
+See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the deeper Chrome CDP refresh notes and alternatives.
 
 ## License
 
