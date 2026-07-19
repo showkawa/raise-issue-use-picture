@@ -118,6 +118,22 @@ For a ready-to-use project-level config and the full loop mapping, see [examples
 
 Codex CLI defaults to the Responses API, which does not support tools on this proxy yet. Point it at the Chat Completions endpoint instead by setting `wire_api = "chat"` in its provider config, with base URL `http://127.0.0.1:8000/v1` and any API key.
 
+Add a custom provider to `%USERPROFILE%\.codex\config.toml`:
+
+```toml
+[model_providers.teams-copilot]
+name = "Teams Copilot Proxy"
+base_url = "http://127.0.0.1:8000/v1"
+wire_api = "chat"
+env_key = "TEAMS_COPILOT_API_KEY"
+
+[profiles.m365]
+model = "m365-copilot"
+model_provider = "teams-copilot"
+```
+
+`env_key` names the environment variable Codex reads the API key from; the proxy ignores its value, so set it to any non-empty placeholder (e.g. `set TEAMS_COPILOT_API_KEY=dummy`). Then run `codex --profile m365`.
+
 ### Continue
 
 Add this to `%USERPROFILE%\.continue\config.json`:
@@ -135,16 +151,6 @@ Add this to `%USERPROFILE%\.continue\config.json`:
   ]
 }
 ```
-
-### Claude Code
-
-```bat
-set ANTHROPIC_BASE_URL=http://127.0.0.1:8000
-set ANTHROPIC_API_KEY=dummy
-claude
-```
-
-Claude Code note: the Anthropic-style `/v1/messages` endpoint does not implement tool use yet. It can answer general prompts, but agentic features such as file reading, bash, and code editing still require the real Anthropic API. (Tool calling is currently only emulated on `/v1/chat/completions`.)
 
 ## Persistent Sessions
 
