@@ -13,7 +13,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Runs locally on `127.0.0.1` by default
 - Auto-captures and refreshes the short-lived browser token
 - Supports persistent Copilot sessions across turns
-- Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages style requests
+- Supports OpenAI Chat Completions and OpenAI Responses style requests
 - Emulated tool calling on `/v1/chat/completions`, so agentic clients like OpenCode can read files, run commands, and edit code
 
 ## Quick Start
@@ -223,7 +223,6 @@ Example:
 | `GET /v1/models` | OpenAI-compatible model list |
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming supported |
 | `POST /v1/responses` | OpenAI Responses API, streaming supported |
-| `POST /v1/messages` | Anthropic Messages API style endpoint |
 
 ## More Examples
 
@@ -242,14 +241,6 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
   -H "Content-Type: application/json" ^
   -H "X-M365-Session-Id: test1" ^
   -d "{\"model\":\"m365-copilot\",\"messages\":[{\"role\":\"user\",\"content\":\"Remember this code word: sakura. Reply only OK.\"}]}"
-```
-
-### Anthropic-Style Messages
-
-```bat
-curl -X POST http://127.0.0.1:8000/v1/messages ^
-  -H "Content-Type: application/json" ^
-  -d "{\"model\":\"m365-copilot\",\"system\":\"Be concise.\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
 ```
 
 ## Security Notes
@@ -279,7 +270,7 @@ Most users only need `.env` after the proxy captures a token.
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Edge profile.
-- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` and `/v1/messages` do not support tools yet.
+- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` does not support tools yet.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
 
