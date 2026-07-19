@@ -3,6 +3,7 @@ import type {
   ChatSession,
   ChatTurnOptions,
   ChatTurnResult,
+  CreateSessionOptions,
   Provider,
   ProviderCapabilities,
 } from '../types.js';
@@ -23,7 +24,7 @@ export class CopilotWebProvider implements Provider {
     await this.manager.init();
   }
 
-  async createSession(): Promise<ChatSession> {
+  async createSession(_options: CreateSessionOptions = {}): Promise<ChatSession> {
     const session = await this.manager.createSession();
     const manager = this.manager;
     const { maxContinuations } = this.config.agent;

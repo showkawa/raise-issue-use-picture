@@ -2,6 +2,7 @@ import type {
   ChatSession,
   ChatTurnOptions,
   ChatTurnResult,
+  CreateSessionOptions,
   Provider,
   ProviderCapabilities,
 } from './types.js';
@@ -27,6 +28,7 @@ const DEFAULT_CAPABILITIES: ProviderCapabilities = {
 export class MockProvider implements Provider {
   readonly id = 'mock';
   readonly sent: string[] = [];
+  readonly systemPrompts: Array<string | undefined> = [];
   private script: MockTurn[];
   private cursor = 0;
   private options: MockProviderOptions;
@@ -39,8 +41,9 @@ export class MockProvider implements Provider {
 
   async init(): Promise<void> {}
 
-  async createSession(): Promise<ChatSession> {
+  async createSession(options: CreateSessionOptions = {}): Promise<ChatSession> {
     const provider = this;
+    provider.systemPrompts.push(options.systemPrompt);
     return {
       async send(message: string, options: ChatTurnOptions = {}): Promise<ChatTurnResult> {
         provider.sent.push(message);

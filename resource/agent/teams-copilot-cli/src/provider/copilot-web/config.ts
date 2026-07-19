@@ -1,8 +1,15 @@
-import type { AgentConfig, AppConfig, BrowserConfig } from '../../types.js';
+import type { AgentConfig, AppConfig, BrowserConfig, ProxyConfig } from '../../types.js';
 import { readFileSync, existsSync } from 'fs';
 import { load as yamlLoad } from 'js-yaml';
 import { join } from 'path';
 import { homedir } from 'os';
+
+const PROXY_DEFAULTS: ProxyConfig = {
+  baseUrl: 'http://127.0.0.1:8000/v1',
+  model: 'm365-copilot',
+  apiKey: 'unused',
+  timeoutMs: 120000,
+};
 
 const AGENT_DEFAULTS: AgentConfig = {
   permissionMode: 'allowlist',
@@ -23,7 +30,8 @@ const AGENT_DEFAULTS: AgentConfig = {
 };
 
 const DEFAULTS: AppConfig = {
-  provider: 'copilot-web',
+  provider: 'proxy',
+  proxy: PROXY_DEFAULTS,
   agent: AGENT_DEFAULTS,
   browser: {
     port: 9222,
@@ -90,8 +98,17 @@ function validate(config: AppConfig): void {
       throw new Error(`Invalid field: copilot.timeouts.${name}`);
     }
   }
-  if (config.provider !== 'copilot-web' && config.provider !== 'mock') {
+  if (
+    config.provider !== 'proxy'
+    && config.provider !== 'copilot-web'
+    && config.provider !== 'mock'
+  ) {
     throw new Error('Invalid field: provider');
+  }
+  if (!config.proxy.baseUrl) throw new Error('Missing required field: proxy.baseUrl');
+  if (!config.proxy.model) throw new Error('Missing required field: proxy.model');
+  if (!Number.isFinite(config.proxy.timeoutMs) || config.proxy.timeoutMs <= 0) {
+    throw new Error('Invalid field: proxy.timeoutMs');
   }
   const { agent } = config;
   if (
@@ -123,6 +140,7 @@ export function loadConfig(configPath?: string): AppConfig {
     return {
       ...DEFAULTS,
       browser: { ...DEFAULTS.browser },
+      proxy: { ...DEFAULTS.proxy },
       copilot: {
         ...DEFAULTS.copilot,
         selectors: { ...DEFAULTS.copilot.selectors },
@@ -174,6 +192,7 @@ export function loadConfig(configPath?: string): AppConfig {
         denyCommands: (raw as Partial<AppConfig>)?.agent?.denyCommands ?? [...AGENT_DEFAULTS.denyCommands],
         allowCommands: (raw as Partial<AppConfig>)?.agent?.allowCommands ?? [...AGENT_DEFAULTS.allowCommands],
       },
+      proxy: { ...PROXY_DEFAULTS, ...raw?.proxy },
       browser: { ...DEFAULTS.browser, ...legacyBrowser, ...raw?.browser },
       copilot: {
         ...DEFAULTS.copilot,

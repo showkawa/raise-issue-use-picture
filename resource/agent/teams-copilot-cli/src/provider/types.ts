@@ -23,10 +23,15 @@ export interface ProviderCapabilities {
   supportsSystemPrompt: boolean;
 }
 
+export interface CreateSessionOptions {
+  /** Optional system persona seeded at the start of the conversation. */
+  systemPrompt?: string;
+}
+
 export interface Provider {
   readonly id: string;
   init(): Promise<void>;
-  createSession(): Promise<ChatSession>;
+  createSession(options?: CreateSessionOptions): Promise<ChatSession>;
   close(): Promise<void>;
   capabilities(): ProviderCapabilities;
 }
