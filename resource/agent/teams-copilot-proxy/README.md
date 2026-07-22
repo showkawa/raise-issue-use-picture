@@ -160,19 +160,15 @@ model_provider = "teams-copilot"
 
 By default, requests are stateless from the Copilot side, and this is the **recommended mode for agentic clients** like OpenCode: the client owns the conversation history and replays it every turn, so a stateless `m365-copilot` keeps history in a single source of truth. Persistent Copilot-side memory on top of a client that already resends history double-counts context and hits Copilot's input limit sooner — do not use it for tool/loop workflows.
 
-If you do want Copilot to keep its own memory across turns (e.g. a plain chat client that does *not* resend history), opt in with the `:persist` model suffix (works on every model id, e.g. `m365-copilot:persist`, `claude-sonnet:persist`) plus a session key. The session key is resolved in this order:
+If you do want Copilot to keep its own memory across turns (e.g. a plain chat client that does *not* resend history), opt in with the `:persist` model suffix (works on every model id, e.g. `m365-copilot:persist`, `claude-sonnet:persist`). No client-side configuration is needed: picking a `:persist` model in the model picker is enough. The session key is resolved in this order:
 
-1. A stable per-conversation header:
-
-```http
-X-M365-Session-Id: my-work-session
-```
-
+1. An `X-M365-Session-Id: my-work-session` header, if the client can send one (most precise; each conversation picks its own id).
 2. Otherwise the request `user` field.
+3. Otherwise a key derived by the proxy from the hash of the conversation's first user message, so each distinct conversation automatically gets its own persistent Copilot session.
 
-The header only takes effect on `:persist` models; requests for plain model ids stay stateless even when the header is set. This lets clients with provider-wide static headers (like OpenCode's `options.headers`) toggle persistence per conversation just by picking a `:persist` model in the model picker. Each workspace or conversation should pick its own header id to keep concurrent conversations isolated.
+The header only takes effect on `:persist` models; requests for plain model ids always stay stateless.
 
-**Caveats:** without a header, `:persist` keys the session by the `user` field; with neither, the request falls back to stateless (a one-time warning is logged) to avoid sharing one global Copilot session across conversations. A single static header shared by many concurrent `:persist` conversations still cross-contaminates them — give each conversation its own header id where possible. See [docs/tickets/05-persist-session-key-collision.md](docs/tickets/05-persist-session-key-collision.md).
+**Caveats:** the derived key relies on the first user message being resent unchanged each turn; if the client compacts or rewrites early history, the key changes and a fresh Copilot session starts (a safe degradation). Two conversations that begin with the exact same first message share a session. With no header, no `user`, and no user message at all, the request falls back to stateless (a one-time warning is logged). See [docs/tickets/05-persist-session-key-collision.md](docs/tickets/05-persist-session-key-collision.md).
 
 ## Examples
 

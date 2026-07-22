@@ -9,7 +9,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from teams_copilot_proxy.app import create_app
+from teams_copilot_proxy.app import _conversation_key, create_app
+from teams_copilot_proxy.models import OpenAIMessage
 from teams_copilot_proxy.cli import (
     _find_m365_page,
     _is_substrate_token,
@@ -406,21 +407,35 @@ def test_openai_persistent_model_suffix_uses_user_as_session_key() -> None:
     assert fake.sessions[0] is not fake.sessions[2]
 
 
-def test_persist_suffix_without_id_falls_back_to_stateless() -> None:
+def test_persist_suffix_without_id_derives_key_from_first_user_message() -> None:
     fake = FakeCopilotClient()
     client = build_client(fake)
 
-    for _ in range(2):
+    def post(first: str, *rest: str) -> None:
+        messages = [{"role": "user", "content": first}]
+        for text in rest:
+            messages.append({"role": "assistant", "content": "ok"})
+            messages.append({"role": "user", "content": text})
         response = client.post(
             "/v1/chat/completions",
-            json={
-                "model": "m365-copilot:persist",
-                "messages": [{"role": "user", "content": "Hello"}],
-            },
+            json={"model": "m365-copilot:persist", "messages": messages},
         )
         assert response.status_code == 200
 
-    assert fake.sessions == [None, None]
+    post("Fix the login bug")
+    post("Fix the login bug", "now add a test")
+    post("Write docs")
+
+    assert fake.sessions[0] is fake.sessions[1]
+    assert fake.sessions[0] is not None
+    assert fake.sessions[2] is not fake.sessions[0]
+
+
+def test_conversation_key_is_none_without_user_text() -> None:
+    assert _conversation_key([OpenAIMessage(role="assistant", content="hi")]) is None
+    assert _conversation_key([OpenAIMessage(role="user", content="   ")]) is None
+    key = _conversation_key([OpenAIMessage(role="user", content="task")])
+    assert key == _conversation_key([OpenAIMessage(role="user", content="task")])
 
 
 def test_persistent_session_turn_flags_are_reserved_in_order() -> None:

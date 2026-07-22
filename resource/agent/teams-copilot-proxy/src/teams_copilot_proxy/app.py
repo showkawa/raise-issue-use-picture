@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -34,7 +35,14 @@ from .substrate_client import (
     SubstrateThrottledError,
 )
 from .token_store import AccessTokenStore
-from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest, TranslatedRequest
+from .models import (
+    AnthropicMessage,
+    AnthropicMessagesRequest,
+    OpenAIChatRequest,
+    OpenAIMessage,
+    OpenAIResponsesRequest,
+    TranslatedRequest,
+)
 from .redaction import redact_outbound
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
@@ -43,7 +51,12 @@ from .tool_protocol import (
     parse_model_output,
     tool_names,
 )
-from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
+from .translator import (
+    flatten_content,
+    translate_anthropic_request,
+    translate_openai_request,
+    translate_responses_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +197,13 @@ def create_app(
             )
             translated = _redact_translated(translated, settings)
             client.tone = _tone_for_model(request.model, effective_default_tone(settings))
-            session = _persistent_session(app, raw_request, request.model, request.user)
+            session = _persistent_session(
+                app,
+                raw_request,
+                request.model,
+                request.user,
+                _conversation_key(request.messages),
+            )
             if request.stream:
                 if request.tools:
                     return StreamingResponse(
@@ -294,7 +313,12 @@ def create_app(
             translated = translate_anthropic_request(request)
             translated = _redact_translated(translated, settings)
             client.tone = _tone_for_model(request.model, effective_default_tone(settings))
-            session = _persistent_session(app, raw_request, request.model)
+            session = _persistent_session(
+                app,
+                raw_request,
+                request.model,
+                derived_key=_conversation_key(request.messages),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -337,6 +361,7 @@ def _persistent_session(
     raw_request: Request,
     model: str,
     fallback_key: str | None = None,
+    derived_key: str | None = None,
 ) -> PersistentSession | None:
     if not model.endswith(_PERSIST_MODEL_SUFFIX):
         return None
@@ -346,15 +371,28 @@ def _persistent_session(
     user_key = (fallback_key or "").strip()
     if user_key:
         return app.state.session_store.get(f"model:{user_key}")
+    if derived_key:
+        return app.state.session_store.get(f"conversation:{derived_key}")
     if not app.state.warned_persist_without_id:
         app.state.warned_persist_without_id = True
         logger.warning(
-            "':persist' used without an %s header or a 'user' field; falling back to a "
-            "stateless request to avoid sharing one global Copilot session across "
-            "conversations. Set an %s header for per-conversation memory.",
-            _SESSION_ID_HEADER,
+            "':persist' used without an %s header, a 'user' field, or a derivable "
+            "conversation key; falling back to a stateless request to avoid sharing "
+            "one global Copilot session across conversations.",
             _SESSION_ID_HEADER,
         )
+    return None
+
+
+def _conversation_key(messages: Sequence[object]) -> str | None:
+    """Stable per-conversation key: hash of the first user message's text."""
+    for message in messages:
+        if isinstance(message, (OpenAIMessage, AnthropicMessage)) and message.role == "user":
+            text = flatten_content(message.content).strip()
+        else:
+            continue
+        if text:
+            return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     return None
 
 
