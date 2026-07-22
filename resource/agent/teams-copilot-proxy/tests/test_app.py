@@ -336,7 +336,7 @@ def test_openai_persistent_session_header_reuses_session() -> None:
     fake = FakeCopilotClient()
     client = build_client(fake)
     body = {
-        "model": "m365-copilot",
+        "model": "m365-copilot:persist",
         "messages": [{"role": "user", "content": "Hello"}],
     }
 
@@ -347,6 +347,44 @@ def test_openai_persistent_session_header_reuses_session() -> None:
     assert second.status_code == 200
     assert fake.sessions[0] is fake.sessions[1]
     assert fake.sessions[0] is not None
+
+
+def test_session_header_is_ignored_for_non_persist_models() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    body = {
+        "model": "claude-sonnet",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+
+    for _ in range(2):
+        response = client.post(
+            "/v1/chat/completions", headers={"X-M365-Session-Id": "work"}, json=body
+        )
+        assert response.status_code == 200
+
+    assert fake.sessions == [None, None]
+
+
+def test_persist_suffix_with_header_creates_session_per_model_choice() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    headers = {"X-M365-Session-Id": "opencode-main"}
+
+    plain = client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "claude-sonnet", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+    persist = client.post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={"model": "claude-sonnet:persist", "messages": [{"role": "user", "content": "Hi"}]},
+    )
+
+    assert plain.status_code == 200 and persist.status_code == 200
+    assert fake.sessions[0] is None
+    assert fake.sessions[1] is not None
 
 
 def test_openai_persistent_model_suffix_uses_user_as_session_key() -> None:

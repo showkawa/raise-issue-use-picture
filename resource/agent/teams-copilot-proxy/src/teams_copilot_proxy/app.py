@@ -338,23 +338,23 @@ def _persistent_session(
     model: str,
     fallback_key: str | None = None,
 ) -> PersistentSession | None:
+    if not model.endswith(_PERSIST_MODEL_SUFFIX):
+        return None
     header_key = (raw_request.headers.get(_SESSION_ID_HEADER) or "").strip()
     if header_key:
         return app.state.session_store.get(f"header:{header_key}")
-    if model.endswith(_PERSIST_MODEL_SUFFIX):
-        user_key = (fallback_key or "").strip()
-        if user_key:
-            return app.state.session_store.get(f"model:{user_key}")
-        if not app.state.warned_persist_without_id:
-            app.state.warned_persist_without_id = True
-            logger.warning(
-                "':persist' used without an %s header or a 'user' field; falling back to a "
-                "stateless request to avoid sharing one global Copilot session across "
-                "conversations. Set an %s header for per-conversation memory.",
-                _SESSION_ID_HEADER,
-                _SESSION_ID_HEADER,
-            )
-        return None
+    user_key = (fallback_key or "").strip()
+    if user_key:
+        return app.state.session_store.get(f"model:{user_key}")
+    if not app.state.warned_persist_without_id:
+        app.state.warned_persist_without_id = True
+        logger.warning(
+            "':persist' used without an %s header or a 'user' field; falling back to a "
+            "stateless request to avoid sharing one global Copilot session across "
+            "conversations. Set an %s header for per-conversation memory.",
+            _SESSION_ID_HEADER,
+            _SESSION_ID_HEADER,
+        )
     return None
 
 
