@@ -384,7 +384,7 @@ async def _chat_resolving_tools(
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
         outcome = parse_model_output(text, allowed)
         if outcome.error is None:
-            if outcome.tool_call is None and outcome.text:
+            if not outcome.tool_calls and outcome.text:
                 triggered = None
                 if detect_confabulation(outcome.text):
                     triggered = CONFABULATION
@@ -408,11 +408,11 @@ async def _chat_resolving_tools(
 
 
 def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dict:
-    if outcome.tool_call is not None:
+    if outcome.tool_calls:
         message = {
             "role": "assistant",
             "content": outcome.text or None,
-            "tool_calls": [outcome.tool_call.as_openai()],
+            "tool_calls": [call.as_openai() for call in outcome.tool_calls],
         }
         finish_reason = "tool_calls"
     else:
@@ -489,18 +489,19 @@ async def _openai_stream_with_tools(
             yield "data: [DONE]\n\n"
             return
 
-        if outcome.tool_call is not None:
-            call = outcome.tool_call.as_openai()
+        if outcome.tool_calls:
             if outcome.text:
                 yield chunk({"content": outcome.text})
+            calls = [call.as_openai() for call in outcome.tool_calls]
             yield chunk({
                 "tool_calls": [
                     {
-                        "index": 0,
+                        "index": index,
                         "id": call["id"],
                         "type": "function",
                         "function": call["function"],
                     }
+                    for index, call in enumerate(calls)
                 ]
             })
             yield chunk({}, "tool_calls")
