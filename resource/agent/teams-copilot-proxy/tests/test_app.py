@@ -87,7 +87,13 @@ def test_models_endpoint() -> None:
     client.app.state.capability = CapabilityProbeResult(
         tier="T1",
         tone="Claude_Sonnet",
-        accepted_tones=["Claude_Sonnet", "Gpt_5_5_Chat", "Magic"],
+        accepted_tones=[
+            "Claude_Sonnet",
+            "Gpt_5_5_Chat",
+            "Magic",
+            "Gpt_5_5_Reasoning",
+            "Gpt_5_6_Reasoning",
+        ],
         probed_at=0.0,
     )
     response = client.get("/v1/models")
@@ -98,6 +104,8 @@ def test_models_endpoint() -> None:
     assert "claude-sonnet" in ids
     assert "gpt-5-5-chat" in ids
     assert "magic" in ids
+    assert "gpt-5-5-reasoning" in ids
+    assert "gpt-5-6-reasoning" in ids
 
 
 def test_models_endpoint_without_probe() -> None:
@@ -989,6 +997,45 @@ def test_probe_result_cache_respects_ttl(tmp_path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["tier"] == "T1"
 
 
+def test_probe_rejects_empty_and_refusal_replies(tmp_path) -> None:
+    class SelectiveFakeClient(ProbingFakeClient):
+        async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+            if "probe_echo" not in prompt:
+                if self.tone == "Magic":
+                    return (
+                        "Sorry, I wasn't able to respond to that. "
+                        "Is there something else I can help with?"
+                    )
+                if self.tone == "Gpt_5_6_Reasoning":
+                    return "   "
+            return await super().chat(prompt, additional_context, session)
+
+    fake = SelectiveFakeClient(fenced_ok=True)
+    result = asyncio.run(probe_capabilities(lambda: fake, tmp_path / "cache.json", 3600))
+    assert "Claude_Sonnet" in result.accepted_tones
+    assert "Gpt_5_5_Chat" in result.accepted_tones
+    assert "Gpt_5_5_Reasoning" in result.accepted_tones
+    assert "Magic" not in result.accepted_tones
+    assert "Gpt_5_6_Reasoning" not in result.accepted_tones
+
+
+def test_probe_retries_transient_refusal_once(tmp_path) -> None:
+    class FlakyFakeClient(ProbingFakeClient):
+        def __init__(self):
+            super().__init__(fenced_ok=True)
+            self.flaked = False
+
+        async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+            if "probe_echo" not in prompt and self.tone == "Magic" and not self.flaked:
+                self.flaked = True
+                return "Sorry, I wasn't able to respond to that."
+            return await super().chat(prompt, additional_context, session)
+
+    fake = FlakyFakeClient()
+    result = asyncio.run(probe_capabilities(lambda: fake, tmp_path / "cache.json", 3600))
+    assert "Magic" in result.accepted_tones
+
+
 def test_model_name_maps_to_tone() -> None:
     fake = FakeCopilotClient()
     client = build_client(fake)
@@ -1009,6 +1056,26 @@ def test_model_name_maps_to_tone() -> None:
             "user": "u1",
             "messages": [{"role": "user", "content": "hi"}],
         },
+    )
+    assert fake.tone == "Gpt_5_5_Chat"
+
+
+def test_reasoning_model_names_map_to_exact_tone() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-5-6-reasoning", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Gpt_5_6_Reasoning"
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-5-5-reasoning", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Gpt_5_5_Reasoning"
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-5-5-chat", "messages": [{"role": "user", "content": "hi"}]},
     )
     assert fake.tone == "Gpt_5_5_Chat"
 
@@ -1492,7 +1559,7 @@ def test_outbound_redaction_does_not_change_response() -> None:
 def test_example_opencode_config_parses_and_declares_tool_call() -> None:
     config_path = Path(__file__).resolve().parent.parent / "examples" / "opencode.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    model = config["provider"]["teams-copilot"]["models"]["m365-copilot"]
+    model = config["provider"]["teams-copilot"]["models"]["claude-sonnet"]
     assert model["tool_call"] is True
     options = config["provider"]["teams-copilot"]["options"]
     assert options["baseURL"] == "http://127.0.0.1:8000/v1"

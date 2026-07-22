@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .config import Settings
-from .probe import probe_capabilities
+from .probe import CANDIDATE_TONES, probe_capabilities
 from .session_store import PersistentSession, PersistentSessionStore
 from .guards import (
     CONFABULATION,
@@ -91,6 +91,9 @@ def _retry_context(
 
 def _tone_for_model(model: str, default_tone: str) -> str:
     name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower()
+    for tone in CANDIDATE_TONES:
+        if _model_id_for_tone(tone) == name:
+            return tone
     for prefix, tone in _TONE_BY_MODEL_PREFIX:
         if name.startswith(prefix):
             return tone

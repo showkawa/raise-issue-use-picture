@@ -12,7 +12,41 @@ from .tool_protocol import parse_model_output, render_tool_instructions, tool_re
 
 logger = logging.getLogger(__name__)
 
-CANDIDATE_TONES = ("Claude_Sonnet", "Gpt_5_5_Chat", "Magic")
+# Tones verified against the substrate backend; the probe keeps whichever
+# ones respond. Each maps to a Copilot model family:
+#   Claude_Sonnet     -> Claude Sonnet 4.6 (Anthropic)
+#   Gpt_5_5_Chat      -> GPT-5 chat model
+#   Magic             -> GPT-5 chat model
+#   Gpt_5_5_Reasoning -> GPT-5 reasoning model
+#   Gpt_5_6_Reasoning -> GPT-5 reasoning model
+CANDIDATE_TONES = (
+    "Claude_Sonnet",
+    "Gpt_5_5_Chat",
+    "Magic",
+    "Gpt_5_5_Reasoning",
+    "Gpt_5_6_Reasoning",
+)
+
+_PROBE_PROMPT = "Reply with the single word: ok"
+_PROBE_ATTEMPTS = 2
+
+# A tone is only usable when the backend actually produces content instead
+# of an empty turn or the generic canned refusal. These markers match that
+# refusal so such tones are dropped from the accepted list.
+_REFUSAL_MARKERS = (
+    "sorry, i wasn't able to respond",
+    "sorry, i wasn’t able to respond",
+    "is there something else i can help with",
+)
+
+
+def _reply_is_usable(reply: str) -> bool:
+    text = " ".join(reply.split())
+    if not text:
+        return False
+    lowered = text.lower()
+    return not any(marker in lowered for marker in _REFUSAL_MARKERS)
+
 
 _PROBE_TOOLS = [
     {
@@ -71,13 +105,8 @@ async def probe_capabilities(
 
     accepted: list[str] = []
     for tone in candidates:
-        client = client_factory()
-        client.tone = tone
-        try:
-            await client.chat("Reply with the single word: ok", [])
-        except SubstrateCopilotError:
-            continue
-        accepted.append(tone)
+        if await _tone_probe_passes(client_factory, tone):
+            accepted.append(tone)
 
     claude = next((t for t in accepted if t.lower().startswith("claude")), None)
     tier = "T3"
@@ -95,6 +124,28 @@ async def probe_capabilities(
     )
     _store_cache(cache_path, result)
     return result
+
+
+async def _tone_probe_passes(
+    client_factory: Callable[[], SubstrateCopilotClient], tone: str
+) -> bool:
+    for attempt in range(1, _PROBE_ATTEMPTS + 1):
+        client = client_factory()
+        client.tone = tone
+        try:
+            reply = await client.chat(_PROBE_PROMPT, [])
+        except SubstrateCopilotError:
+            return False
+        if _reply_is_usable(reply):
+            return True
+        logger.info(
+            "Capability probe: tone %s returned an empty or refusal reply "
+            "(attempt %d/%d).",
+            tone,
+            attempt,
+            _PROBE_ATTEMPTS,
+        )
+    return False
 
 
 async def _fenced_probe(

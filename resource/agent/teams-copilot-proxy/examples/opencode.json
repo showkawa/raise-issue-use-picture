@@ -9,18 +9,8 @@
         "apiKey": "unused"
       },
       "models": {
-        "m365-copilot": {
-          "name": "M365 Copilot",
-          "tool_call": true,
-          "reasoning": false,
-          "attachment": false,
-          "limit": {
-            "context": 128000,
-            "output": 8192
-          }
-        },
         "claude-sonnet": {
-          "name": "M365 Copilot (Claude Sonnet)",
+          "name": "Copilot (Claude Sonnet)",
           "tool_call": true,
           "reasoning": false,
           "attachment": false,
@@ -30,7 +20,7 @@
           }
         },
         "gpt-5-5-chat": {
-          "name": "M365 Copilot (GPT-5.5 Chat)",
+          "name": "Copilot (GPT-5.5 Chat)",
           "tool_call": true,
           "reasoning": false,
           "attachment": false,
@@ -39,8 +29,58 @@
             "output": 8192
           }
         },
-        "magic": {
-          "name": "M365 Copilot (Magic)",
+        "gpt-5-5-reasoning": {
+          "name": "Copilot (GPT-5.5 Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "gpt-5-6-reasoning": {
+          "name": "Copilot (GPT-5.6 Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "claude-sonnet:persist": {
+          "name": "Copilot (Claude Sonnet, persist)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "gpt-5-5-chat:persist": {
+          "name": "Copilot (GPT-5.5 Chat, persist)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },        
+        "gpt-5-5-reasoning:persist": {
+          "name": "Copilot (GPT-5.5 Reasoning, persist)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },        
+        "gpt-5-6-reasoning:persist": {
+          "name": "Copilot (GPT-5.6 Reasoning, persist)",
           "tool_call": true,
           "reasoning": false,
           "attachment": false,
