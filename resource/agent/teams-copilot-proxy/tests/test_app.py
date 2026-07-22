@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -19,10 +20,14 @@ from teams_copilot_proxy.cli import (
 )
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.session_store import PersistentSessionStore
+from teams_copilot_proxy.guards import DISENGAGED_SENTINEL
+from teams_copilot_proxy.probe import probe_capabilities
 from teams_copilot_proxy.substrate_client import (
     _OPTIONS_SETS,
     SubstrateCopilotClient,
     SubstrateCopilotError,
+    SubstrateDisengagedError,
+    SubstrateThrottledError,
 )
 from teams_copilot_proxy.tool_protocol import TOOL_FAILURE_SENTINEL
 
@@ -157,7 +162,7 @@ def test_default_client_factory_reloads_token_from_env(tmp_path, monkeypatch) ->
     seen_tokens: list[str] = []
 
     class RecordingCopilotClient(FakeCopilotClient):
-        def __init__(self, access_token: str, _time_zone: str, _proxy: str = ""):
+        def __init__(self, access_token: str, _time_zone: str, _proxy: str = "", _tone: str = "Claude_Sonnet"):
             super().__init__()
             seen_tokens.append(access_token)
 
@@ -721,6 +726,424 @@ def test_streaming_returns_failure_sentinel_when_all_corrections_fail() -> None:
     assert TOOL_FAILURE_SENTINEL in payload
     assert '"finish_reason": "stop"' in payload
     assert len(fake.calls) == 2
+
+
+class DisengagingCopilotClient(FakeCopilotClient):
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        self.calls.append((prompt, additional_context))
+        self.sessions.append(session)
+        raise SubstrateDisengagedError("disengaged")
+
+
+class ThrottledCopilotClient(FakeCopilotClient):
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        raise SubstrateThrottledError("substrate throttled", retry_after=30)
+
+
+def test_confabulation_guard_retries_then_tool_call() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            "I cannot access your local files. Please paste the file content.",
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert len(fake.calls) == 2
+    assert "MUST reply with ONLY one fenced tool_call block" in fake.calls[1][0]
+
+
+def test_hallucinated_completion_guard_retries_then_tool_call() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            "I have created the file for you.",
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Create the file"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(fake.calls) == 2
+    assert "did not emit any tool call" in fake.calls[1][0]
+
+
+def test_guards_share_retry_budget_and_report_honestly() -> None:
+    confab = "I cannot access your local files. Please paste the file content."
+    fake = ToolCallingCopilotClient([confab, confab])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"]["content"] == confab
+    assert body["x_m365_guard"] == {"guard": "confabulation", "retries_exhausted": True}
+    assert len(fake.calls) == 2
+
+
+def test_disengaged_retries_with_fresh_session_then_reports() -> None:
+    fake = DisengagingCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Do something"}],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["message"]["content"] == DISENGAGED_SENTINEL
+    assert body["x_m365_guard"]["guard"] == "disengaged"
+    assert len(fake.calls) == 2
+    assert fake.sessions[1] is None
+
+
+def test_throttled_upstream_maps_to_429_with_retry_after() -> None:
+    fake = ThrottledCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "30"
+
+
+class ProbingFakeClient(FakeCopilotClient):
+    def __init__(self, fenced_ok: bool = True, reject_claude: bool = False):
+        super().__init__()
+        self.tone = "Claude_Sonnet"
+        self.fenced_ok = fenced_ok
+        self.reject_claude = reject_claude
+        self.probe_calls: list[tuple[str, str]] = []
+
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        self.probe_calls.append((self.tone, prompt))
+        self.calls.append((prompt, additional_context))
+        self.sessions.append(session)
+        if self.reject_claude and self.tone.lower().startswith("claude"):
+            raise SubstrateCopilotError("Failed to invoke 'Chat'")
+        if "probe_echo" in prompt:
+            if self.fenced_ok:
+                return '```tool_call\n{"name": "probe_echo", "arguments": {"value": "ping"}}\n```'
+            return "I cannot call tools."
+        return "ok"
+
+
+def _probe_app(fake: ProbingFakeClient, tmp_path) -> TestClient:
+    settings = Settings(
+        M365_ACCESS_TOKEN="fake-token",
+        M365_STARTUP_PROBE=True,
+        M365_PROBE_CACHE_PATH=str(tmp_path / "probe_cache.json"),
+    )
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    return TestClient(app)
+
+
+def test_startup_probe_selects_t1_when_claude_passes_fenced_probe(tmp_path) -> None:
+    fake = ProbingFakeClient(fenced_ok=True)
+    with _probe_app(fake, tmp_path) as client:
+        health = client.get("/healthz").json()
+        assert health["capability"]["tier"] == "T1"
+        assert health["capability"]["tone"] == "Claude_Sonnet"
+
+
+def test_startup_probe_falls_back_to_t3_without_claude(tmp_path) -> None:
+    fake = ProbingFakeClient(reject_claude=True)
+    with _probe_app(fake, tmp_path) as client:
+        health = client.get("/healthz").json()
+        assert health["capability"]["tier"] == "T3"
+        assert health["capability"]["tone"] == "Gpt_5_5_Chat"
+
+        client.post(
+            "/v1/chat/completions",
+            json={"model": "ignored", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert fake.tone == "Gpt_5_5_Chat"
+
+
+def test_probe_result_cache_respects_ttl(tmp_path) -> None:
+    path = tmp_path / "cache.json"
+    fresh = {
+        "tier": "T1",
+        "tone": "Claude_Sonnet",
+        "accepted_tones": ["Claude_Sonnet"],
+        "probed_at": time.time(),
+    }
+    path.write_text(json.dumps(fresh), encoding="utf-8")
+
+    def exploding_factory():
+        raise AssertionError("probe should use the cache")
+
+    result = asyncio.run(probe_capabilities(exploding_factory, path, 3600))
+    assert result.tier == "T1"
+
+    stale = dict(fresh, probed_at=time.time() - 7200)
+    path.write_text(json.dumps(stale), encoding="utf-8")
+    fake = ProbingFakeClient(fenced_ok=True)
+    result = asyncio.run(probe_capabilities(lambda: fake, path, 3600))
+    assert result.tier == "T1"
+    assert fake.probe_calls
+    assert json.loads(path.read_text(encoding="utf-8"))["tier"] == "T1"
+
+
+def test_model_name_maps_to_tone() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Gpt_5_5_Chat"
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "claude-3-sonnet", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Claude_Sonnet"
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4o:persist",
+            "user": "u1",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert fake.tone == "Gpt_5_5_Chat"
+
+
+def test_unknown_model_uses_default_claude_tone() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Claude_Sonnet"
+
+
+def test_default_tone_is_configurable() -> None:
+    fake = FakeCopilotClient()
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_DEFAULT_TONE="Magic")
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert fake.tone == "Magic"
+
+
+def test_substrate_chat_invoke_uses_selected_tone() -> None:
+    token = make_jwt(int(time.time()) + 3600)
+    substrate = SubstrateCopilotClient(token, tone="Gpt_5_5_Chat")
+    frame = substrate._chat_invoke("hi", "conv", "sess", "req", True)
+    assert '"tone": "Gpt_5_5_Chat"' in frame
+
+
+class SlowToolCallingCopilotClient(ToolCallingCopilotClient):
+    def __init__(self, replies: list[str], delay: float):
+        super().__init__(replies)
+        self.delay = delay
+
+    async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
+        await asyncio.sleep(self.delay)
+        return await super().chat(prompt, additional_context, session)
+
+
+def _sse_frames(payload: str) -> list[str]:
+    return [frame for frame in payload.split("\n\n") if frame]
+
+
+def _sse_content_deltas(payload: str) -> list[str]:
+    deltas: list[str] = []
+    for line in payload.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        event = json.loads(line[len("data: "):])
+        choices = event.get("choices")
+        if not choices:
+            continue
+        content = choices[0].get("delta", {}).get("content")
+        if content:
+            deltas.append(content)
+    return deltas
+
+
+def test_streaming_with_tools_sends_keepalive_while_resolving() -> None:
+    fake = SlowToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```'],
+        delay=0.2,
+    )
+    settings = Settings(
+        M365_ACCESS_TOKEN="fake-token",
+        M365_STREAM_KEEPALIVE_INTERVAL_S=0.02,
+    )
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    frames = _sse_frames(payload)
+    assert frames[0].startswith("data: ")
+    assert '"role": "assistant"' in frames[0]
+    keepalive_frames = [frame for frame in frames if frame.startswith(": keepalive")]
+    assert keepalive_frames
+    first_keepalive = frames.index(keepalive_frames[0])
+    first_tool_call = next(i for i, frame in enumerate(frames) if '"tool_calls"' in frame)
+    assert first_keepalive < first_tool_call
+    assert '"name": "read_file"' in payload
+    assert '"finish_reason": "tool_calls"' in payload
+    assert "data: [DONE]" in payload
+
+
+def test_streaming_with_tools_chunks_plain_text_typewriter() -> None:
+    fake = ToolCallingCopilotClient(["A plain streamed answer."])
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_STREAM_CHUNK_CHARS=5)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    deltas = _sse_content_deltas(payload)
+    assert len(deltas) == 5
+    assert "".join(deltas) == "A plain streamed answer."
+    assert all(len(piece) <= 5 for piece in deltas)
+    assert '"finish_reason": "stop"' in payload
+
+
+def test_streaming_chunking_disabled_emits_single_content_chunk() -> None:
+    fake = ToolCallingCopilotClient(["A plain streamed answer."])
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_STREAM_CHUNK_CHARS=0)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    deltas = _sse_content_deltas(payload)
+    assert deltas == ["A plain streamed answer."]
+
+
+def test_streaming_failure_sentinel_is_emitted_atomically() -> None:
+    fake = ToolCallingCopilotClient([MALFORMED_TOOL_CALL, MALFORMED_TOOL_CALL])
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_STREAM_CHUNK_CHARS=5)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert _sse_content_deltas(payload) == [TOOL_FAILURE_SENTINEL]
+    assert '"finish_reason": "stop"' in payload
+
+
+def test_streaming_with_tools_tool_call_stays_atomic_with_chunking() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_STREAM_CHUNK_CHARS=5)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+
+    assert response.status_code == 200
+    assert payload.count('"tool_calls": [{"index": 0') == 1
+    assert '"name": "read_file"' in payload
+    assert '"finish_reason": "tool_calls"' in payload
 
 
 def test_correction_count_is_configurable_and_final_attempt_is_strict() -> None:

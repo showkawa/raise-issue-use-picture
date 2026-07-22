@@ -61,6 +61,7 @@ class ToolParseOutcome:
     text: str
     tool_call: ParsedToolCall | None = None
     error: str | None = None
+    guard: str | None = None
 
     @property
     def looks_like_attempt(self) -> bool:

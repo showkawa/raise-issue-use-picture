@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -9,9 +10,29 @@ from collections.abc import AsyncIterator, Callable
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from .config import Settings
+from .probe import probe_capabilities
 from .session_store import PersistentSession, PersistentSessionStore
-from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from .guards import (
+    CONFABULATION,
+    DISENGAGED,
+    DISENGAGED_SENTINEL,
+    HALLUCINATED_COMPLETION,
+    TOOL_PARSE_FAILURE,
+    detect_confabulation,
+    detect_hallucinated_completion,
+    disengaged_retry_prompt,
+    guard_retry_prompt,
+)
+from .substrate_client import (
+    SubstrateCopilotClient,
+    SubstrateCopilotError,
+    SubstrateDisengagedError,
+    SubstrateThrottledError,
+)
 from .token_store import AccessTokenStore
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest, TranslatedRequest
 from .redaction import redact_outbound
@@ -29,12 +50,31 @@ logger = logging.getLogger(__name__)
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"
 
+_TONE_BY_MODEL_PREFIX = (
+    ("claude", "Claude_Sonnet"),
+    ("gpt", "Gpt_5_5_Chat"),
+    ("magic", "Magic"),
+)
+
+
+def _tone_for_model(model: str, default_tone: str) -> str:
+    name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower()
+    for prefix, tone in _TONE_BY_MODEL_PREFIX:
+        if name.startswith(prefix):
+            return tone
+    return default_tone
+
 
 def create_app(
     settings: Settings | None = None,
     copilot_client_factory: Callable[[], SubstrateCopilotClient] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Teams Copilot Proxy")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await _startup_capability_probe()
+        yield
+
+    app = FastAPI(title="Teams Copilot Proxy", lifespan=lifespan)
     resolved_settings = settings or Settings()
     app.state.settings = resolved_settings
     app.state.token_store = AccessTokenStore(resolved_settings.access_token)
@@ -45,8 +85,28 @@ def create_app(
             app.state.token_store.get(),
             resolved_settings.time_zone,
             resolved_settings.proxy,
+            resolved_settings.default_tone,
         )
     )
+    app.state.capability = None
+
+    async def _startup_capability_probe() -> None:
+        if not resolved_settings.startup_probe or not resolved_settings.access_token:
+            return
+        try:
+            app.state.capability = await probe_capabilities(
+                app.state.copilot_client_factory,
+                Path(resolved_settings.probe_cache_path),
+                resolved_settings.probe_ttl_seconds,
+            )
+        except Exception:
+            logger.exception(
+                "Startup capability probe failed; falling back to configured defaults."
+            )
+
+    def effective_default_tone(settings: Settings) -> str:
+        capability = app.state.capability
+        return capability.tone if capability else settings.default_tone
 
     def get_settings() -> Settings:
         return app.state.settings
@@ -56,7 +116,10 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"status": "ok", "token": app.state.token_store.status()}
+        body = {"status": "ok", "token": app.state.token_store.status()}
+        if app.state.capability:
+            body["capability"] = app.state.capability.as_dict()
+        return body
 
     @app.get("/v1/token/status")
     async def token_status() -> dict:
@@ -89,6 +152,7 @@ def create_app(
                 settings.suppress_system_prompt_with_tools,
             )
             translated = _redact_translated(translated, settings)
+            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
             session = _persistent_session(app, raw_request, request.model, request.user)
             if request.stream:
                 if request.tools:
@@ -101,6 +165,9 @@ def create_app(
                             request.tools,
                             session,
                             settings.tool_correction_retries,
+                            keepalive_interval=settings.stream_keepalive_interval_s,
+                            chunk_chars=settings.stream_chunk_chars,
+                            chunk_delay_ms=settings.stream_chunk_delay_ms,
                         ),
                         media_type="text/event-stream",
                     )
@@ -127,6 +194,12 @@ def create_app(
             text = await client.chat(translated.prompt, translated.additional_context, session)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except SubstrateThrottledError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
         except SubstrateCopilotError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -155,6 +228,7 @@ def create_app(
             request = OpenAIResponsesRequest.model_validate(body)
             translated = translate_responses_request(request)
             translated = _redact_translated(translated, settings)
+            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
             session = _persistent_session(app, raw, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -167,6 +241,12 @@ def create_app(
 
         try:
             text = await client.chat(translated.prompt, translated.additional_context, session)
+        except SubstrateThrottledError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
         except SubstrateCopilotError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -194,6 +274,7 @@ def create_app(
         try:
             translated = translate_anthropic_request(request)
             translated = _redact_translated(translated, settings)
+            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
             session = _persistent_session(app, raw_request, request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -206,6 +287,12 @@ def create_app(
 
         try:
             text = await client.chat(translated.prompt, translated.additional_context, session)
+        except SubstrateThrottledError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after)},
+            ) from exc
         except SubstrateCopilotError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -267,29 +354,50 @@ async def _chat_resolving_tools(
     max_corrections: int = 1,
 ) -> ToolParseOutcome:
     allowed = tool_names(tools)
-    text = await client.chat(prompt, additional_context, session)
-    outcome = parse_model_output(text, allowed)
-    if outcome.error is None:
-        return outcome
-
-    last_text = text
-    last_error = outcome.error
-    attempts = max(max_corrections, 0)
-    for attempt in range(attempts):
-        strict = attempts > 1 and attempt == attempts - 1
-        retry_context = additional_context + [
-            f"Original request:\n{prompt}",
-            f"Your previous reply:\n{last_text}",
-        ]
-        retry_text = await client.chat(
-            correction_prompt(last_error, strict=strict), retry_context, session
-        )
-        retry_outcome = parse_model_output(retry_text, allowed)
-        if retry_outcome.error is None:
-            return retry_outcome
-        last_text = retry_text
-        last_error = retry_outcome.error
-    return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL)
+    budget = max(0, min(max_corrections, 2))
+    used = 0
+    attempt_prompt = prompt
+    attempt_context = additional_context
+    while True:
+        try:
+            text = await client.chat(attempt_prompt, attempt_context, session)
+        except SubstrateDisengagedError:
+            if used < budget:
+                used += 1
+                session = None
+                attempt_prompt = disengaged_retry_prompt(prompt)
+                attempt_context = additional_context
+                continue
+            return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
+        outcome = parse_model_output(text, allowed)
+        if outcome.error is None:
+            if outcome.tool_call is None and outcome.text:
+                triggered = None
+                if detect_confabulation(outcome.text):
+                    triggered = CONFABULATION
+                elif detect_hallucinated_completion(outcome.text):
+                    triggered = HALLUCINATED_COMPLETION
+                if triggered is not None:
+                    if used < budget:
+                        used += 1
+                        attempt_prompt = guard_retry_prompt(triggered)
+                        attempt_context = additional_context + [
+                            f"Original request:\n{prompt}",
+                            f"Your previous reply:\n{text}",
+                        ]
+                        continue
+                    outcome.guard = triggered
+            return outcome
+        if used < budget:
+            used += 1
+            strict = budget > 1 and used == budget
+            attempt_prompt = correction_prompt(outcome.error, strict=strict)
+            attempt_context = additional_context + [
+                f"Original request:\n{prompt}",
+                f"Your previous reply:\n{text}",
+            ]
+            continue
+        return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 
 
 def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dict:
@@ -303,7 +411,7 @@ def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dic
     else:
         message = {"role": "assistant", "content": outcome.text}
         finish_reason = "stop"
-    return {
+    body = {
         "id": f"chatcmpl_{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -316,6 +424,15 @@ def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dic
             }
         ],
     }
+    if outcome.guard:
+        body["x_m365_guard"] = {"guard": outcome.guard, "retries_exhausted": True}
+    return body
+
+
+def _split_stream_text(text: str, chunk_chars: int) -> list[str]:
+    if chunk_chars <= 0 or len(text) <= chunk_chars:
+        return [text]
+    return [text[i : i + chunk_chars] for i in range(0, len(text), chunk_chars)]
 
 
 async def _openai_stream_with_tools(
@@ -326,11 +443,14 @@ async def _openai_stream_with_tools(
     tools: list[dict],
     session: PersistentSession | None = None,
     max_corrections: int = 1,
+    keepalive_interval: float = 15.0,
+    chunk_chars: int = 24,
+    chunk_delay_ms: int = 0,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
 
-    def chunk(delta: dict, finish_reason: str | None = None) -> str:
+    def chunk(delta: dict, finish_reason: str | None = None, extra: dict | None = None) -> str:
         payload = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -338,38 +458,66 @@ async def _openai_stream_with_tools(
             "model": model_alias,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
+        if extra:
+            payload.update(extra)
         return f"data: {json.dumps(payload)}\n\n"
 
     yield chunk({"role": "assistant"})
-    try:
-        outcome = await _chat_resolving_tools(
+    resolve_task = asyncio.create_task(
+        _chat_resolving_tools(
             client, prompt, additional_context, tools, session, max_corrections
         )
-    except SubstrateCopilotError as exc:
-        yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
-        yield "data: [DONE]\n\n"
-        return
+    )
+    try:
+        try:
+            if keepalive_interval > 0:
+                while True:
+                    done, _ = await asyncio.wait({resolve_task}, timeout=keepalive_interval)
+                    if done:
+                        break
+                    yield ": keepalive\n\n"
+            outcome = await resolve_task
+        except SubstrateCopilotError as exc:
+            yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
-    if outcome.tool_call is not None:
-        call = outcome.tool_call.as_openai()
-        if outcome.text:
-            yield chunk({"content": outcome.text})
-        yield chunk({
-            "tool_calls": [
-                {
-                    "index": 0,
-                    "id": call["id"],
-                    "type": "function",
-                    "function": call["function"],
-                }
-            ]
-        })
-        yield chunk({}, "tool_calls")
-    else:
-        if outcome.text:
-            yield chunk({"content": outcome.text})
-        yield chunk({}, "stop")
-    yield "data: [DONE]\n\n"
+        if outcome.tool_call is not None:
+            call = outcome.tool_call.as_openai()
+            if outcome.text:
+                yield chunk({"content": outcome.text})
+            yield chunk({
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": call["id"],
+                        "type": "function",
+                        "function": call["function"],
+                    }
+                ]
+            })
+            yield chunk({}, "tool_calls")
+        else:
+            if outcome.text:
+                pieces = (
+                    [outcome.text]
+                    if outcome.guard is not None
+                    else _split_stream_text(outcome.text, chunk_chars)
+                )
+                for index, piece in enumerate(pieces):
+                    if index and chunk_delay_ms > 0:
+                        await asyncio.sleep(chunk_delay_ms / 1000)
+                    yield chunk({"content": piece})
+            extra = (
+                {"x_m365_guard": {"guard": outcome.guard, "retries_exhausted": True}}
+                if outcome.guard
+                else None
+            )
+            yield chunk({}, "stop", extra)
+        yield "data: [DONE]\n\n"
+    finally:
+        if not resolve_task.done():
+            resolve_task.cancel()
 
 
 async def _openai_stream(

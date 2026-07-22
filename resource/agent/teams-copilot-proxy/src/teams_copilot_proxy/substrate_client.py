@@ -79,8 +79,24 @@ class SubstrateCopilotError(RuntimeError):
     pass
 
 
+class SubstrateDisengagedError(SubstrateCopilotError):
+    pass
+
+
+class SubstrateThrottledError(SubstrateCopilotError):
+    def __init__(self, message: str, retry_after: int = 30):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class SubstrateCopilotClient:
-    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo", proxy: str = ""):
+    def __init__(
+        self,
+        access_token: str,
+        time_zone: str = "Asia/Tokyo",
+        proxy: str = "",
+        tone: str = "Claude_Sonnet",
+    ):
         if not access_token:
             raise SubstrateCopilotError(
                 "M365_ACCESS_TOKEN is missing. Start the debug Chrome window and let startup token capture complete, "
@@ -89,6 +105,7 @@ class SubstrateCopilotClient:
         self._token = access_token
         self._time_zone = time_zone
         self._proxy = proxy
+        self.tone = tone
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -164,7 +181,7 @@ class SubstrateCopilotClient:
                 },
                 "plugins": [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
                 "isSbsSupported": True,
-                "tone": "Magic",
+                "tone": self.tone,
                 "renderReferencesBehindEOS": True,
             }],
             "invocationId": "0",
@@ -247,12 +264,14 @@ class SubstrateCopilotClient:
                                 entries = msgs if isinstance(msgs, list) else [msgs]
                                 for entry in reversed(entries):
                                     if entry.get("author") != "user":
+                                        _raise_if_disengaged(entry)
                                         fallback_text = entry.get("text", "")
                                         break
                         if t == 2:
                             item_msgs = (msg.get("item") or {}).get("messages") or []
                             for entry in reversed(item_msgs):
                                 if entry.get("author") != "user":
+                                    _raise_if_disengaged(entry)
                                     fallback_text = entry.get("text", "")
                                     break
                         if t == 3:
@@ -262,6 +281,11 @@ class SubstrateCopilotClient:
         except SubstrateCopilotError:
             raise
         except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429:
+                raise SubstrateThrottledError(
+                    "Substrate throttled the request (HTTP 429)."
+                ) from exc
             raise SubstrateCopilotError(str(exc)) from exc
 
     async def chat(
@@ -274,6 +298,13 @@ class SubstrateCopilotClient:
         async for chunk in self.chat_stream(prompt, additional_context, session):
             chunks.append(chunk)
         return "".join(chunks)
+
+
+def _raise_if_disengaged(entry: dict) -> None:
+    if entry.get("messageType") == "Disengaged":
+        raise SubstrateDisengagedError(
+            "Copilot's safety filter disengaged from this request."
+        )
 
 
 def _combine_text(prompt: str, context: list[str]) -> str:
