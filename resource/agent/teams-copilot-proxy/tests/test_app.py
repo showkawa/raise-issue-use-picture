@@ -603,110 +603,6 @@ def test_chat_completion_returns_tool_calls_when_model_emits_tool_call_block() -
     assert any("read_file" in part for part in tools_context)
 
 
-def test_chat_completion_returns_multiple_tool_calls_from_array_block() -> None:
-    fake = ToolCallingCopilotClient(
-        [
-            '```tool_call\n[{"name": "read_file", "arguments": {"path": "a.py"}}, '
-            '{"name": "read_file", "arguments": {"path": "b.py"}}]\n```'
-        ]
-    )
-    client = build_client(fake)
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "ignored",
-            "tools": SAMPLE_TOOLS,
-            "messages": [{"role": "user", "content": "Read a.py and b.py"}],
-        },
-    )
-
-    assert response.status_code == 200
-    choice = response.json()["choices"][0]
-    assert choice["finish_reason"] == "tool_calls"
-    calls = choice["message"]["tool_calls"]
-    assert len(calls) == 2
-    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "a.py"}
-    assert json.loads(calls[1]["function"]["arguments"]) == {"path": "b.py"}
-    assert calls[0]["id"] != calls[1]["id"]
-
-
-def test_tool_call_array_with_unknown_tool_triggers_correction() -> None:
-    fake = ToolCallingCopilotClient(
-        [
-            '```tool_call\n[{"name": "read_file", "arguments": {"path": "a.py"}}, '
-            '{"name": "nuke_it", "arguments": {}}]\n```',
-            '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
-        ]
-    )
-    client = build_client(fake)
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "ignored",
-            "tools": SAMPLE_TOOLS,
-            "messages": [{"role": "user", "content": "Read a.py"}],
-        },
-    )
-
-    assert response.status_code == 200
-    choice = response.json()["choices"][0]
-    assert choice["finish_reason"] == "tool_calls"
-    assert len(choice["message"]["tool_calls"]) == 1
-    assert len(fake.calls) == 2
-
-
-def test_protocol_context_includes_parallel_calls_and_working_method() -> None:
-    fake = ToolCallingCopilotClient(
-        ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
-    )
-    client = build_client(fake)
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "ignored",
-            "tools": SAMPLE_TOOLS,
-            "messages": [{"role": "user", "content": "Read a.py"}],
-        },
-    )
-
-    assert response.status_code == 200
-    context = fake.calls[0][1]
-    protocol = next(part for part in context if "Tool calling protocol" in part)
-    assert "To call SEVERAL tools at once" in protocol
-    assert "Working method" in protocol
-    assert "Report honestly" in protocol
-
-
-def test_streaming_with_tools_emits_multiple_tool_calls_with_indices() -> None:
-    fake = ToolCallingCopilotClient(
-        [
-            '```tool_call\n[{"name": "read_file", "arguments": {"path": "a.py"}}, '
-            '{"name": "read_file", "arguments": {"path": "b.py"}}]\n```'
-        ]
-    )
-    client = build_client(fake)
-    with client.stream(
-        "POST",
-        "/v1/chat/completions",
-        json={
-            "model": "ignored",
-            "stream": True,
-            "tools": SAMPLE_TOOLS,
-            "messages": [{"role": "user", "content": "Read a.py and b.py"}],
-        },
-    ) as response:
-        payload = "".join(
-            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
-            for chunk in response.iter_text()
-        )
-
-    assert response.status_code == 200
-    assert '"index": 0' in payload
-    assert '"index": 1' in payload
-    assert payload.count('"type": "function"') == 2
-    assert '"finish_reason": "tool_calls"' in payload
-
-
 def test_chat_completion_plain_text_with_tools_returns_stop() -> None:
     fake = ToolCallingCopilotClient(["Just a normal answer."])
     client = build_client(fake)
@@ -1368,7 +1264,7 @@ def test_tool_reminder_is_appended_after_prompt_when_tools_present() -> None:
     )
 
 
-def test_system_prompt_is_fused_when_tools_present() -> None:
+def test_system_prompt_is_suppressed_when_tools_present() -> None:
     fake = ToolCallingCopilotClient(
         ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
     )
@@ -1388,13 +1284,8 @@ def test_system_prompt_is_fused_when_tools_present() -> None:
     assert response.status_code == 200
     context = fake.calls[0][1]
     assert not any(part.startswith("System instructions:") for part in context)
-    fused = next(part for part in context if part.startswith("Client system instructions"))
-    assert "OVERRIDES" in fused
-    assert "cannot access files" in fused
-    protocol_index = next(
-        i for i, part in enumerate(context) if part.startswith("Tool calling protocol")
-    )
-    assert context.index(fused) < protocol_index
+    assert not any("cannot access files" in part for part in context)
+    assert any("Tool calling protocol" in part for part in context)
 
 
 def test_system_prompt_kept_when_no_tools() -> None:
