@@ -21,7 +21,7 @@ from teams_copilot_proxy.cli import (
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.session_store import PersistentSessionStore
 from teams_copilot_proxy.guards import DISENGAGED_SENTINEL
-from teams_copilot_proxy.probe import probe_capabilities
+from teams_copilot_proxy.probe import CapabilityProbeResult, probe_capabilities
 from teams_copilot_proxy.substrate_client import (
     _OPTIONS_SETS,
     SubstrateCopilotClient,
@@ -82,6 +82,24 @@ def make_jwt(exp: int, aud: str = "https://substrate.office.com/sydney") -> str:
 
 
 def test_models_endpoint() -> None:
+    client = build_client(FakeCopilotClient())
+    client.app.state.capability = CapabilityProbeResult(
+        tier="T1",
+        tone="Claude_Sonnet",
+        accepted_tones=["Claude_Sonnet", "Gpt_5_5_Chat", "Magic"],
+        probed_at=0.0,
+    )
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    ids = [m["id"] for m in body["data"]]
+    assert ids[0] == "m365-copilot"
+    assert "claude-sonnet" in ids
+    assert "gpt-5-5-chat" in ids
+    assert "magic" in ids
+
+
+def test_models_endpoint_without_probe() -> None:
     client = build_client(FakeCopilotClient())
     response = client.get("/v1/models")
     assert response.status_code == 200

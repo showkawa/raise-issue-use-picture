@@ -84,6 +84,10 @@ def _tone_for_model(model: str, default_tone: str) -> str:
     return default_tone
 
 
+def _model_id_for_tone(tone: str) -> str:
+    return tone.lower().replace("_", "-")
+
+
 def create_app(
     settings: Settings | None = None,
     copilot_client_factory: Callable[[], SubstrateCopilotClient] | None = None,
@@ -146,14 +150,22 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models(settings: Settings = Depends(get_settings)) -> dict:
+        ids = [settings.model_alias]
+        capability = app.state.capability
+        if capability:
+            for tone in capability.accepted_tones:
+                model_id = _model_id_for_tone(tone)
+                if model_id not in ids:
+                    ids.append(model_id)
         return {
             "object": "list",
             "data": [
                 {
-                    "id": settings.model_alias,
+                    "id": model_id,
                     "object": "model",
                     "owned_by": "microsoft-365-copilot",
                 }
+                for model_id in ids
             ],
         }
 

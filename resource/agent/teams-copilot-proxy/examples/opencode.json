@@ -18,6 +18,36 @@
             "context": 128000,
             "output": 8192
           }
+        },
+        "claude-sonnet": {
+          "name": "M365 Copilot (Claude Sonnet)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "gpt-5-5-chat": {
+          "name": "M365 Copilot (GPT-5.5 Chat)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "magic": {
+          "name": "M365 Copilot (Magic)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
         }
       }
     }
