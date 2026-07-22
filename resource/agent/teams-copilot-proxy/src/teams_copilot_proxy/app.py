@@ -57,6 +57,25 @@ _TONE_BY_MODEL_PREFIX = (
 )
 
 
+def _upstream_http_error(exc: SubstrateCopilotError) -> HTTPException:
+    if isinstance(exc, SubstrateThrottledError):
+        return HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+def _retry_context(
+    additional_context: list[str], prompt: str, previous_reply: str
+) -> list[str]:
+    return additional_context + [
+        f"Original request:\n{prompt}",
+        f"Your previous reply:\n{previous_reply}",
+    ]
+
+
 def _tone_for_model(model: str, default_tone: str) -> str:
     name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower()
     for prefix, tone in _TONE_BY_MODEL_PREFIX:
@@ -194,14 +213,8 @@ def create_app(
             text = await client.chat(translated.prompt, translated.additional_context, session)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except SubstrateThrottledError as exc:
-            raise HTTPException(
-                status_code=429,
-                detail=str(exc),
-                headers={"Retry-After": str(exc.retry_after)},
-            ) from exc
         except SubstrateCopilotError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise _upstream_http_error(exc) from exc
 
         return JSONResponse({
             "id": f"chatcmpl_{uuid.uuid4().hex}",
@@ -241,14 +254,8 @@ def create_app(
 
         try:
             text = await client.chat(translated.prompt, translated.additional_context, session)
-        except SubstrateThrottledError as exc:
-            raise HTTPException(
-                status_code=429,
-                detail=str(exc),
-                headers={"Retry-After": str(exc.retry_after)},
-            ) from exc
         except SubstrateCopilotError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise _upstream_http_error(exc) from exc
 
         return JSONResponse({
             "id": f"resp_{uuid.uuid4().hex}",
@@ -287,14 +294,8 @@ def create_app(
 
         try:
             text = await client.chat(translated.prompt, translated.additional_context, session)
-        except SubstrateThrottledError as exc:
-            raise HTTPException(
-                status_code=429,
-                detail=str(exc),
-                headers={"Retry-After": str(exc.retry_after)},
-            ) from exc
         except SubstrateCopilotError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise _upstream_http_error(exc) from exc
 
         return JSONResponse({
             "id": f"msg_{uuid.uuid4().hex}",
@@ -381,10 +382,7 @@ async def _chat_resolving_tools(
                     if used < budget:
                         used += 1
                         attempt_prompt = guard_retry_prompt(triggered)
-                        attempt_context = additional_context + [
-                            f"Original request:\n{prompt}",
-                            f"Your previous reply:\n{text}",
-                        ]
+                        attempt_context = _retry_context(additional_context, prompt, text)
                         continue
                     outcome.guard = triggered
             return outcome
@@ -392,10 +390,7 @@ async def _chat_resolving_tools(
             used += 1
             strict = budget > 1 and used == budget
             attempt_prompt = correction_prompt(outcome.error, strict=strict)
-            attempt_context = additional_context + [
-                f"Original request:\n{prompt}",
-                f"Your previous reply:\n{text}",
-            ]
+            attempt_context = _retry_context(additional_context, prompt, text)
             continue
         return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 

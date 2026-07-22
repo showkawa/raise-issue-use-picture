@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     time_zone: str = Field(default="Asia/Tokyo", alias="M365_TIME_ZONE")
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")
     default_tone: str = Field(default="Claude_Sonnet", alias="M365_DEFAULT_TONE")
-    startup_probe: bool = Field(default=False, alias="M365_STARTUP_PROBE")
+    startup_probe: bool = Field(default=True, alias="M365_STARTUP_PROBE")
     probe_cache_path: str = Field(default=".probe_cache.json", alias="M365_PROBE_CACHE_PATH")
     probe_ttl_seconds: float = Field(default=86_400, alias="M365_PROBE_TTL_SECONDS")
     max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
