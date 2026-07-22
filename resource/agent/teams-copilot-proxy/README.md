@@ -33,8 +33,12 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Runs locally on `127.0.0.1` by default
 - Auto-captures and refreshes the short-lived browser token
 - Supports persistent Copilot sessions across turns
-- Supports OpenAI Chat Completions and OpenAI Responses style requests
+- Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages style requests
 - Emulated tool calling on `/v1/chat/completions`, so agentic clients like OpenCode can read files, run commands, and edit code
+- Maps OpenAI model names to Copilot tones (`claude*` -> `Claude_Sonnet`, `gpt*` -> `Gpt_5_5_Chat`, `magic*` -> `Magic`); unknown names use the default tone
+- Startup capability probe: tests candidate tones and a fenced tool probe, tiers the deployment T1 (Claude + reliable tools) or T3 (best-effort tools), cached for 24h and reported on `/healthz`
+- Guard layer for tool turns: detects confabulation ("I can't access your files"), hallucinated completion, safety-filter disengagement, and upstream throttling; shares a per-request retry budget and reports honestly via an `x_m365_guard` field instead of faking tool success
+- Streaming with tools: immediate HTTP 200, `: keepalive` comments while Copilot thinks, then typewriter-style chunked delivery of plain-text answers (tool calls stay atomic)
 
 ## Quick Start
 
@@ -73,6 +77,8 @@ Use these settings for any OpenAI-compatible client:
 | API Key | `unused` |
 | Model | `m365-copilot` |
 | Persistent model | `m365-copilot:persist` |
+
+The model name also selects the Copilot tone: names starting with `claude`/`gpt`/`magic` map to `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses `M365_DEFAULT_TONE` (or the tone chosen by the startup probe).
 
 ### OpenCode
 
@@ -122,7 +128,9 @@ opencode
 
 For persistent Copilot-side conversation memory, use the model `m365-copilot:persist`.
 
-**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Note: when `tools` is present, streaming responses are buffered and delivered at once.
+**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a single fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. One tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text.
+
+When `tools` is present and `stream: true`, the proxy replies with HTTP 200 immediately, emits the assistant role chunk, sends `: keepalive` SSE comments (every `M365_STREAM_KEEPALIVE_INTERVAL_S` seconds) while the full reply is buffered and parsed, then delivers plain-text answers as typewriter-style chunks of `M365_STREAM_CHUNK_CHARS` characters. Tool calls are always sent as a single atomic chunk. If a guard fired and retries were exhausted, the final chunk carries an `x_m365_guard` field.
 
 **System prompt on tool turns:** OpenCode's built-in system prompt is written for native function calling and makes the Copilot browser channel refuse in prose ("I can't access your local files") instead of emitting a tool call. So when `tools` are present the proxy drops the client system prompt and lets the tool protocol be the only authoritative instruction (`M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS`, default on). To restore forwarding the full system prompt, set `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=false`.
 
@@ -255,7 +263,10 @@ Example:
 | `GET /v1/token/status` | Token validity, expiry time, and seconds remaining |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `POST /v1/chat/completions` | OpenAI Chat Completions, streaming supported |
-| `POST /v1/responses` | OpenAI Responses API, streaming supported |
+| `POST /v1/responses` | OpenAI Responses API, text only (no tools), streaming supported |
+| `POST /v1/messages` | Anthropic Messages API, text only (no tools), streaming supported |
+
+`GET /healthz` also reports the startup probe result when available, e.g. `"capability": {"tier": "T1", "tone": "Claude_Sonnet", ...}`.
 
 ## Environment Variables
 
@@ -266,8 +277,15 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_ACCESS_TOKEN` | optional at startup | Browser WebSocket token. If missing, startup capture can fill `.env`. |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Optional. Time zone sent to Copilot. Usually no need to set this if `Asia/Tokyo` is correct. |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Optional. Model name returned by `/v1/models`. Usually no need to change this. |
+| `M365_DEFAULT_TONE` | `Claude_Sonnet` | Optional. Copilot tone used when the request model name does not start with `claude`/`gpt`/`magic`. Overridden by the startup probe result when the probe runs. |
+| `M365_STARTUP_PROBE` | `true` | Optional. Probe candidate tones and run a fenced tool probe at startup to tier the deployment T1/T3. Skipped when no token is present. Set to `false` to disable. |
+| `M365_PROBE_CACHE_PATH` | `.probe_cache.json` | Optional. Where the probe result is cached. |
+| `M365_PROBE_TTL_SECONDS` | `86400` | Optional. Probe cache lifetime; the probe re-runs after this. |
+| `M365_STREAM_KEEPALIVE_INTERVAL_S` | `15` | Optional. Interval between `: keepalive` SSE comments while a tool-carrying streaming request is being resolved. `0` disables keepalives. |
+| `M365_STREAM_CHUNK_CHARS` | `24` | Optional. Typewriter chunk size for plain-text answers on tool-carrying streaming requests. `0` sends the whole text in one chunk. |
+| `M365_STREAM_CHUNK_DELAY_MS` | `0` | Optional. Delay between typewriter chunks. Default `0` adds no extra latency. |
 | `M365_MAX_TRANSCRIPT_CHARS` | `200000` | Optional. Safety-net character budget for the flattened prior-conversation transcript; whole turn units are dropped oldest-first and a tool call is never split from its result. OpenCode is the primary context bounder. |
-| `M365_TOOL_CORRECTION_RETRIES` | `1` | Optional. Number of correction attempts when Copilot returns a malformed tool call. The final attempt uses a stricter reminder; after all attempts fail the proxy returns the Failure Sentinel with `finish_reason: stop`. |
+| `M365_TOOL_CORRECTION_RETRIES` | `1` | Optional. Shared per-request retry budget (capped at 2) for all tool-turn guards: malformed tool calls, confabulation, hallucinated completion, and safety-filter disengagement. The final correction attempt uses a stricter reminder; after the budget is exhausted the proxy reports honestly (Failure Sentinel or the flagged text) with an `x_m365_guard` field. Upstream HTTP 429 is returned as a standard 429 with `Retry-After`. |
 | `M365_REDACT_OUTBOUND` | `true` | Optional. When on, scrubs secret-like strings (tokens, API keys, private keys, `KEY=value` env secrets) from everything sent upstream to Copilot, replacing them with `[REDACTED]`. Only affects outbound content, not the client response. |
 | `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` | `true` | Optional. When on, drops the client (e.g. OpenCode) system prompt on requests that carry `tools`, so the Copilot browser channel emits a tool call instead of refusing in prose. Set to `false` to forward the full system prompt on tool turns. Requests without tools are unaffected. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
@@ -284,7 +302,8 @@ Most users only need `.env` after the proxy captures a token.
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Chrome profile.
-- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn, buffered streaming); `/v1/responses` does not support tools yet.
+- Tool calls are emulated via prompting on `/v1/chat/completions` only (single tool per turn; with tools the body is buffered upstream, then streamed to the client as typewriter chunks); `/v1/responses` and `/v1/messages` do not support tools.
+- Guard detection is heuristic; on T3 tiers (no Claude tone) tool calling is best-effort and unreliable.
 - Token usage numbers are placeholders.
 - System prompts and prior conversation history are translated into plain text context.
 
