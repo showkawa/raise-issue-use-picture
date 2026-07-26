@@ -50,46 +50,6 @@
             "context": 265000,
             "output": 8192
           }
-        },
-        "claude-sonnet:persist": {
-          "name": "Copilot (Claude Sonnet, persist)",
-          "tool_call": true,
-          "reasoning": false,
-          "attachment": false,
-          "limit": {
-            "context": 265000,
-            "output": 8192
-          }
-        },
-        "gpt-5-5-chat:persist": {
-          "name": "Copilot (GPT-5.5 Chat, persist)",
-          "tool_call": true,
-          "reasoning": false,
-          "attachment": true,
-          "limit": {
-            "context": 265000,
-            "output": 8192
-          }
-        },
-        "gpt-5-5-reasoning:persist": {
-          "name": "Copilot (GPT-5.5 Reasoning, persist)",
-          "tool_call": true,
-          "reasoning": false,
-          "attachment": true,
-          "limit": {
-            "context": 265000,
-            "output": 8192
-          }
-        },
-        "gpt-5-6-reasoning:persist": {
-          "name": "Copilot (GPT-5.6 Reasoning, persist)",
-          "tool_call": true,
-          "reasoning": false,
-          "attachment": true,
-          "limit": {
-            "context": 265000,
-            "output": 8192
-          }
         }
       }
     }
