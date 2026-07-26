@@ -109,4 +109,6 @@ class TranslatedRequest(BaseModel):
     images: list[ImageInput] = Field(default_factory=list)
     sampling: SamplingParams = Field(default_factory=SamplingParams)
     tools: list[dict[str, Any]] | None = None
+    # Names of the context parts injected into the prompt (Monitor telemetry).
+    injections: list[str] = Field(default_factory=list)
 

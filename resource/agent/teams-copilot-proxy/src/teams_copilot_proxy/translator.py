@@ -232,6 +232,9 @@ def translate_openai_request(
         raise ValueError("A final user or tool message is required.")
 
     additional_context: list[str] = []
+    # Names of the context parts actually injected into this turn, so the Monitor
+    # can show what the model was told instead of leaving it to guesswork.
+    injections: list[str] = []
     tools = _dedup_tools(request.tools, dedup_websearch)
     if request.tools and len(tools) < len(request.tools):
         dropped_names = [
@@ -242,6 +245,7 @@ def translate_openai_request(
             f"web-grounded answers through Bing: {', '.join(dropped_names)}. Use the "
             "remaining tools for local actions."
         )
+        injections.append("websearch_dropped")
     system_text = _join_lines(system_lines)
     # Client system prompts (e.g. OpenCode's) assert a competing named identity
     # that trips the substrate guardrail and suppresses tool_calls. Rather than
@@ -250,13 +254,15 @@ def translate_openai_request(
     # A hard drop remains available via suppress_system_prompt_with_tools.
     if system_text:
         if tools and suppress_system_prompt_with_tools:
-            pass
+            injections.append("system_suppressed")
         elif tools and sanitize_system_prompt_with_tools:
             sanitized = neutralize_system_identity(system_text)
             if sanitized:
                 additional_context.append(f"{_SYSTEM_GUIDELINE_FRAMING}\n{sanitized}")
+                injections.append("system_sanitized")
         else:
             additional_context.append(f"System instructions:\n{system_text}")
+            injections.append("system_verbatim")
     # Images carried as data: URIs on the final user turn are uploaded to the
     # substrate and referenced via message annotations, so they are NOT dropped.
     # Only warn when there are image parts we cannot upload (e.g. remote URLs).
@@ -267,19 +273,29 @@ def translate_openai_request(
             "channel cannot fetch, so those image(s) were omitted. Do not claim to "
             "have seen them; ask for a text description if you need one."
         )
+        injections.append("image_urls_dropped")
     if tools:
         additional_context.append(
             render_tool_instructions(tools, allow_parallel_tool_calls)
         )
-    transcript_lines = _truncate_transcript(transcript_lines, max_transcript_chars)
+        injections.append("tool_protocol")
+    kept_lines = _truncate_transcript(transcript_lines, max_transcript_chars)
+    if len(kept_lines) < len(transcript_lines):
+        injections.append("transcript_truncated")
+    transcript_lines = kept_lines
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
+        injections.append("transcript")
     json_instruction = _json_mode_instruction(request.response_format)
     if json_instruction:
         additional_context.append(json_instruction)
+        injections.append("json_mode")
     if tools:
         prompt = f"{prompt}{tool_reminder(tools, allow_parallel_tool_calls)}"
+        injections.append("tool_reminder")
+    if images:
+        injections.append(f"images:{len(images)}")
     sampling = SamplingParams(temperature=request.temperature, top_p=request.top_p)
     return TranslatedRequest(
         prompt=prompt,
@@ -287,5 +303,6 @@ def translate_openai_request(
         images=images,
         sampling=sampling,
         tools=tools,
+        injections=injections,
     )
 

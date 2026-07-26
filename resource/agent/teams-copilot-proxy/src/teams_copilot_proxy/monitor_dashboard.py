@@ -41,6 +41,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <nav>
     <button data-view="summary" class="active">Summary</button>
     <button data-view="requests">Requests</button>
+    <button data-view="context">Context</button>
     <button data-view="errors">Errors</button>
   </nav>
   <span id="tokeninfo" class="muted" style="margin-left:auto;font-size:12px"></span>
@@ -149,13 +150,23 @@ async function renderSummary() {
   content.innerHTML = html;
 }
 
+function shortPath(p) {
+  if (!p) return '';
+  const parts = String(p).split('/');
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : p;
+}
+function pct(v) { return v == null ? '' : (v * 100).toFixed(1) + '%'; }
+
 async function renderRequests() {
   const data = await api('requests?limit=100');
-  let html = '<table><tr><th>time</th><th>id</th><th>session</th><th>model</th><th>tone</th><th>effort</th><th>mode</th><th>stream</th><th>status</th><th>guard</th><th>tokens</th><th>ms</th></tr>'
+  let html = '<table><tr><th>time</th><th>id</th><th>session</th><th>project</th><th>turn</th><th>model</th><th>tone</th><th>effort</th><th>mode</th><th>tools</th><th>ctx%</th><th>stream</th><th>status</th><th>guard</th><th>tokens</th><th>ms</th></tr>'
     + data.requests.map(r =>
       `<tr class="req" data-id="${esc(r.id)}"><td>${fmtTs(r.ts)}</td><td>${esc(r.id.slice(0, 18))}…</td>`
-      + `<td>${esc(r.session_key || '')}</td><td>${esc(r.model)}</td><td>${esc(r.tone)}</td>`
+      + `<td>${esc(r.client_session_id || r.session_key || '')}</td>`
+      + `<td title="${esc(r.project_path || '')}">${esc(shortPath(r.project_path))}</td>`
+      + `<td>${esc(r.turn_kind || '')}</td><td>${esc(r.model)}</td><td>${esc(r.tone)}</td>`
       + `<td>${esc(r.reasoning_effort || '')}</td><td>${esc(r.planning_mode || '')}</td>`
+      + `<td title="${esc(r.tool_kinds || '')}">${r.tools_count || ''}</td><td>${pct(r.context_pct)}</td>`
       + `<td>${r.stream ? 'yes' : ''}</td><td class="${esc(r.status)}">${esc(r.status)}</td>`
       + `<td>${esc(r.guard || '')}</td><td>${r.total_tokens}</td><td>${r.duration_ms}</td></tr>`
     ).join('') + '</table><div id="detail"></div>';
@@ -169,6 +180,17 @@ async function showDetail(id) {
   const box = document.getElementById('detail');
   let html = `<b>${esc(d.id)}</b> — ${esc(d.status)}${d.guard ? ' / ' + esc(d.guard) : ''}`
     + `${d.error ? '<pre>' + esc(d.error) + '</pre>' : ''}`;
+  html += '<h2>Request shape</h2><table><tr><th>project</th><th>turn</th><th>client</th>'
+    + '<th>msgs</th><th>transcript B</th><th>system B</th><th>ctx%</th><th>tools</th>'
+    + '<th>tool kinds</th><th>tools fp</th><th>temp</th><th>top_p</th><th>max tok</th>'
+    + '<th>resp fmt</th><th>injections</th></tr>'
+    + `<tr><td>${esc(d.project_path || '')}</td><td>${esc(d.turn_kind || '')}</td>`
+    + `<td>${esc(d.client_agent || '')}</td><td>${d.messages_count ?? ''}</td>`
+    + `<td>${d.transcript_bytes ?? ''}</td><td>${d.system_bytes ?? ''}</td>`
+    + `<td>${pct(d.context_pct)}</td><td>${d.tools_count ?? ''}</td>`
+    + `<td>${esc(d.tool_kinds || '')}</td><td>${esc(d.tools_fingerprint || '')}</td>`
+    + `<td>${d.temperature ?? ''}</td><td>${d.top_p ?? ''}</td><td>${d.max_tokens ?? ''}</td>`
+    + `<td>${esc(d.response_format || '')}</td><td>${esc(d.injections || '')}</td></tr></table>';
   if (d.prompt_summary) html += '<h2>Prompt excerpt</h2><pre>' + esc(d.prompt_summary) + '</pre>';
   if (d.reply_snippet) html += '<h2>Reply excerpt</h2><pre>' + esc(d.reply_snippet) + '</pre>';
   html += '<h2>Attempt chain</h2><table><tr><th>#</th><th>ms</th><th>phase</th><th>guard</th><th>retried</th><th>status</th><th>why</th><th>text</th></tr>'
@@ -178,8 +200,41 @@ async function showDetail(id) {
       + `<td>${a.error_detail ? esc(a.error_detail) : ''}</td>`
       + `<td>${a.text ? '<pre>' + esc(a.text) + '</pre>' : '<span class="muted">not captured</span>'}</td></tr>`
     ).join('') + '</table>';
+  html += '<h2>Upstream (M365)</h2><table><tr><th>#</th><th>conversation</th><th>req id</th>'
+    + '<th>sent B</th><th>1st frame ms</th><th>frames</th><th>msg types</th>'
+    + '<th>reply B</th><th>cites</th><th>clean end</th><th>status</th><th>close</th>'
+    + '<th>injections</th></tr>'
+    + d.attempts.map(a =>
+      `<tr><td>${a.seq}</td><td>${esc((a.conversation_id || '').slice(0, 12))}</td>`
+      + `<td>${esc((a.client_request_id || '').slice(0, 8))}</td><td>${a.sent_bytes ?? ''}</td>`
+      + `<td>${a.first_frame_ms ?? ''}</td><td>${a.frames ?? ''}</td>`
+      + `<td>${esc(a.message_types || '')}</td><td>${a.reply_bytes ?? ''}</td>`
+      + `<td>${a.citations ?? ''}</td>`
+      + `<td class="${a.terminated_cleanly === 0 ? 'error' : ''}">${a.terminated_cleanly == null ? '' : (a.terminated_cleanly ? 'yes' : 'NO')}</td>`
+      + `<td>${a.upstream_status ?? ''}</td><td>${esc(a.close_reason || '')}</td>`
+      + `<td>${esc(a.injections || '')}</td></tr>`
+      + (a.final_frame ? `<tr><td></td><td colspan="12"><pre>${esc(a.final_frame)}</pre></td></tr>` : '')
+      + (a.sent_head ? `<tr><td></td><td colspan="12"><pre>${esc(a.sent_head)}${a.sent_tail ? '\n…\n' + esc(a.sent_tail) : ''}</pre></td></tr>` : '')
+    ).join('') + '</table>';
   box.innerHTML = html;
   box.style.display = 'block';
+}
+
+async function renderContext() {
+  const data = await api('context-pressure?limit=200');
+  content.innerHTML = '<h2>Context pressure</h2>'
+    + '<table><tr><th>time</th><th>session</th><th>project</th><th>turn</th>'
+    + '<th>msgs</th><th>prompt tokens</th><th>ctx%</th><th>transcript B</th>'
+    + '<th>system B</th><th>tools</th><th>status</th><th>guard</th></tr>'
+    + data.requests.slice().reverse().map(r =>
+      `<tr><td>${fmtTs(r.ts)}</td><td>${esc(r.client_session_id || r.session_key || '')}</td>`
+      + `<td title="${esc(r.project_path || '')}">${esc(shortPath(r.project_path))}</td>`
+      + `<td>${esc(r.turn_kind || '')}</td><td>${r.messages_count ?? ''}</td>`
+      + `<td>${r.prompt_tokens ?? ''}</td><td>${pct(r.context_pct)}</td>`
+      + `<td>${r.transcript_bytes ?? ''}</td><td>${r.system_bytes ?? ''}</td>`
+      + `<td>${r.tools_count ?? ''}</td><td class="${esc(r.status)}">${esc(r.status)}</td>`
+      + `<td>${esc(r.guard || '')}</td></tr>`
+    ).join('') + '</table>';
 }
 
 async function renderErrors() {
@@ -197,6 +252,7 @@ async function refresh() {
     document.getElementById('status').textContent = 'refreshing…';
     if (view === 'summary') await renderSummary();
     else if (view === 'requests') await renderRequests();
+    else if (view === 'context') await renderContext();
     else await renderErrors();
     document.getElementById('status').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {

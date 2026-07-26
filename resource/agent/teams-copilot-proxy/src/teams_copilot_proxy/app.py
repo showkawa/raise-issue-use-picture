@@ -56,6 +56,13 @@ from .monitor import (
 )
 from .monitor_dashboard import DASHBOARD_HTML
 from .redaction import redact_outbound
+from .request_facts import (
+    message_bytes,
+    project_path,
+    tool_kinds,
+    tools_fingerprint,
+    turn_kind,
+)
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
@@ -368,6 +375,9 @@ def create_app(
                 allow_parallel,
                 settings.dedup_websearch,
             )
+            recorder.observe(client)
+            _record_request_shape(recorder, raw_request, request, translated)
+            recorder.add_injection(*translated.injections)
             _record_tool_results(recorder, request.messages)
             planning_mode = _normalize_planning_mode(settings.tool_planning_mode)
             if translated.tools:
@@ -380,6 +390,7 @@ def create_app(
                 ledger_hint = _format_agent_ledger_hint(ledger)
                 if ledger_hint is not None:
                     translated.additional_context.append(ledger_hint)
+                    recorder.add_injection("evidence_ledger")
             translated = _redact_translated(translated, settings)
             client.tone = selected_tone
             client.images = translated.images
@@ -394,11 +405,14 @@ def create_app(
             input_text = _combine_text(
                 translated.prompt, translated.additional_context
             )
-            if settings.context_limit and estimate_tokens(input_text) > settings.context_limit:
-                raise ValueError(
-                    f"Estimated prompt tokens {estimate_tokens(input_text)} exceed "
-                    f"the M365 Copilot context limit ({settings.context_limit})."
-                )
+            prompt_tokens = estimate_tokens(input_text)
+            if settings.context_limit:
+                recorder.set_context_pct(prompt_tokens / settings.context_limit)
+                if prompt_tokens > settings.context_limit:
+                    raise ValueError(
+                        f"Estimated prompt tokens {prompt_tokens} exceed "
+                        f"the M365 Copilot context limit ({settings.context_limit})."
+                    )
             if request.stream:
                 if translated.tools:
                     return StreamingResponse(
@@ -530,11 +544,28 @@ def create_app(
 
     @app.get("/monitor/api/requests")
     async def monitor_requests(
-        raw_request: Request, limit: int = 50, session: str | None = None
+        raw_request: Request,
+        limit: int = 50,
+        session: str | None = None,
+        project: str | None = None,
+        turn_kind: str | None = None,
     ) -> dict:
         monitor = require_monitor(raw_request)
         monitor.flush()
-        return {"requests": monitor.sink.requests(limit=limit, session=session)}
+        return {
+            "requests": monitor.sink.requests(
+                limit=limit,
+                session=session,
+                project=project,
+                turn_kind=turn_kind,
+            )
+        }
+
+    @app.get("/monitor/api/context-pressure")
+    async def monitor_context_pressure(raw_request: Request, limit: int = 200) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"requests": monitor.sink.context_pressure(limit=limit)}
 
     @app.get("/monitor/api/requests/{request_id}")
     async def monitor_request_detail(raw_request: Request, request_id: str) -> dict:
@@ -700,7 +731,37 @@ def _record_tool_results(recorder, messages: Sequence[OpenAIMessage]) -> None:
             name=name,
             is_error=content.lstrip().lower().startswith("error"),
             result_bytes=len(content.encode("utf-8")),
+            head=content,
         )
+
+
+def _record_request_shape(
+    recorder,
+    raw_request: Request,
+    request: OpenAIChatRequest,
+    translated: TranslatedRequest,
+) -> None:
+    """Hand the Monitor the identity and shape of the OpenCode request: which
+    client and session, which project, how big the context is and which tools it
+    exposed. Metadata only — no transcript or file content."""
+    transcript_bytes, system_bytes = message_bytes(request.messages)
+    recorder.set_request_shape(
+        client_session_id=(raw_request.headers.get(_MONITOR_SESSION_HEADER) or "").strip()
+        or None,
+        client_agent=raw_request.headers.get("user-agent"),
+        project_path=project_path(request.messages),
+        turn_kind=turn_kind(request.messages, translated.tools),
+        messages_count=len(request.messages),
+        transcript_bytes=transcript_bytes,
+        system_bytes=system_bytes,
+        tools_count=len(translated.tools or []),
+        tool_kinds=tool_kinds(translated.tools),
+        tools_fingerprint=tools_fingerprint(translated.tools),
+        temperature=request.temperature,
+        top_p=request.top_p,
+        max_tokens=request.max_completion_tokens or request.max_tokens,
+        response_format=(request.response_format or {}).get("type"),
+    )
 
 
 def _completion_output_text(body: dict) -> str:
@@ -725,6 +786,7 @@ def _redact_translated(translated: TranslatedRequest, settings: Settings) -> Tra
         images=translated.images,
         sampling=translated.sampling,
         tools=translated.tools,
+        injections=translated.injections,
     )
 
 
@@ -832,6 +894,7 @@ async def _chat_resolving_tools(
                 )
                 session = None
                 attempt_prompt = disengaged_retry_prompt(prompt)
+                recorder.add_injection(f"correction:{DISENGAGED}")
                 attempt_context = additional_context
                 continue
             recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
@@ -870,6 +933,7 @@ async def _chat_resolving_tools(
                         )
                         attempt_prompt = guard_retry_prompt(triggered)
                         attempt_context = _retry_context(additional_context, prompt, text)
+                        recorder.add_injection(f"correction:{triggered}")
                         continue
                     outcome.guard = triggered
                     recorder.add_attempt(
@@ -889,6 +953,7 @@ async def _chat_resolving_tools(
                 used_parse += 1
                 strict = budget > 1 and used_parse == budget
                 attempt_prompt = correction_prompt(outcome.error, strict=strict)
+            recorder.add_injection(f"correction:{guard_kind}")
             recorder.add_attempt(
                 started, guard=guard_kind, retried=True,
                 status=STATUS_GUARD, text=text, error_detail=outcome.error,
@@ -925,6 +990,7 @@ async def _route_resolving_tools(
     substrate round trip for the router-vs-single A/B.
     """
     select_context = additional_context + [_ROUTER_SELECT_RULES]
+    recorder.add_injection("router_select")
     recorder.set_phase("select")
     outcome = await _chat_resolving_tools(
         client,

@@ -12,6 +12,7 @@ import websockets
 
 from .models import ImageInput
 from .session_store import PersistentSession
+from .telemetry import TurnTelemetry
 from .token_store import decode_jwt_payload, is_substrate_token_claims
 
 SIGNALR_SEP = "\x1e"
@@ -127,6 +128,8 @@ class SubstrateCopilotClient:
         # Best-effort decoding options (e.g. temperature/topP) forwarded into the
         # Chathub ``options`` object; empty means the web-client default ``{}``.
         self.options: dict[str, float] = {}
+        # Facts about the most recent substrate round trip, read by the Monitor.
+        self.last_turn: TurnTelemetry | None = None
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -337,6 +340,17 @@ class SubstrateCopilotClient:
     ) -> AsyncIterator[str]:
         req_id = str(uuid.uuid4())
         url = self._ws_url(conv_id, session_id, req_id)
+        turn = TurnTelemetry(
+            conversation_id=conv_id,
+            client_request_id=req_id,
+            substrate_session_id=session_id,
+            start_of_session=is_start_of_session,
+            images=len(annotations or []),
+            option_sets=len(_OPTIONS_SETS) + (1 if annotations else 0),
+        )
+        turn.mark_sent(text)
+        self.last_turn = turn
+        started = time.perf_counter()
         try:
             async with websockets.connect(
                 url,
@@ -362,6 +376,7 @@ class SubstrateCopilotClient:
                         except json.JSONDecodeError:
                             continue
                         t = msg.get("type")
+                        turn.mark_frame(int((time.perf_counter() - started) * 1000))
                         if t == 6:
                             continue
                         if t == 1 and msg.get("target") == "update":
@@ -371,12 +386,14 @@ class SubstrateCopilotClient:
                                 if not yielded_any and fallback_text:
                                     yield fallback_text
                                 yielded_any = True
+                                turn.reply_bytes += len(delta.encode("utf-8"))
                                 yield delta
                             msgs = args.get("messages")
                             if msgs:
                                 entries = msgs if isinstance(msgs, list) else [msgs]
                                 for entry in reversed(entries):
                                     if entry.get("author") != "user":
+                                        turn.mark_message(entry)
                                         _raise_if_disengaged(entry)
                                         fallback_text = entry.get("text", "")
                                         break
@@ -384,17 +401,23 @@ class SubstrateCopilotClient:
                             item_msgs = (msg.get("item") or {}).get("messages") or []
                             for entry in reversed(item_msgs):
                                 if entry.get("author") != "user":
+                                    turn.mark_message(entry)
                                     _raise_if_disengaged(entry)
                                     fallback_text = entry.get("text", "")
                                     break
                         if t == 3:
+                            turn.terminated_cleanly = True
                             if not yielded_any and fallback_text:
+                                turn.reply_bytes = len(fallback_text.encode("utf-8"))
                                 yield fallback_text
                             return
         except SubstrateCopilotError:
             raise
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            response = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+            status = response.status_code if response is not None else None
+            turn.upstream_status = status
+            turn.close_reason = f"{type(exc).__name__}: {exc}"[:200]
             if status == 429:
                 raise SubstrateThrottledError(
                     "Substrate throttled the request (HTTP 429)."

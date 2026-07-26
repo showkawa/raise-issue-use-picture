@@ -17,6 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .telemetry import SupportsTurnTelemetry, TurnTelemetry
 from .usage import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,11 @@ def _truncate(text: str | None, limit: int = _SNIPPET_LIMIT) -> str | None:
     return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
+def _flag(value: bool | None) -> int | None:
+    """Tri-state boolean for SQLite: None stays unknown."""
+    return None if value is None else (1 if value else 0)
+
+
 @dataclass
 class AttemptRecord:
     """一次 chat completion 请求内部的单次 substrate 往返。"""
@@ -99,6 +105,41 @@ class AttemptRecord:
     error_detail: str | None = None
     # router 模式下的阶段标记：select / answer；single 模式为 None。
     phase: str | None = None
+    # 这一轮实际注入的上下文部件（tool_protocol/ledger/correction:... 等）。
+    injections: str | None = None
+    # proxy → M365 与 M365 → proxy 的往返事实（来自 TurnTelemetry）。
+    conversation_id: str | None = None
+    client_request_id: str | None = None
+    sent_bytes: int | None = None
+    first_frame_ms: int | None = None
+    frames: int | None = None
+    message_types: str | None = None
+    reply_bytes: int | None = None
+    citations: int | None = None
+    terminated_cleanly: bool | None = None
+    upstream_status: int | None = None
+    close_reason: str | None = None
+    # 现场（受 capture 档位约束）：上游最终帧与发出的 prompt 头尾。
+    final_frame: str | None = None
+    sent_head: str | None = None
+    sent_tail: str | None = None
+
+    def absorb(self, turn: TurnTelemetry) -> None:
+        """Copy one substrate round trip's facts onto this attempt."""
+        self.conversation_id = turn.conversation_id or None
+        self.client_request_id = turn.client_request_id or None
+        self.sent_bytes = turn.sent_bytes
+        self.first_frame_ms = turn.first_frame_ms
+        self.frames = turn.frames
+        self.message_types = turn.types_csv()
+        self.reply_bytes = turn.reply_bytes
+        self.citations = turn.citations
+        self.terminated_cleanly = turn.terminated_cleanly
+        self.upstream_status = turn.upstream_status
+        self.close_reason = turn.close_reason
+        self.final_frame = turn.final_frame
+        self.sent_head = turn.sent_head
+        self.sent_tail = turn.sent_tail
 
 
 @dataclass
@@ -119,6 +160,8 @@ class ToolResultRecord:
     name: str | None
     is_error: bool
     result_bytes: int
+    # 失败结果的开头片段（受 capture 档位约束），用于看清工具为什么报错。
+    head: str | None = None
 
 
 @dataclass
@@ -155,6 +198,23 @@ class RequestRecord:
     had_tools: bool = False
     planning_mode: str = "single"
     reasoning_effort: str | None = None
+    # OpenCode 侧身份与请求形状（元数据，不含正文）。
+    client_session_id: str | None = None
+    client_agent: str | None = None
+    project_path: str | None = None
+    turn_kind: str | None = None
+    messages_count: int = 0
+    transcript_bytes: int = 0
+    system_bytes: int = 0
+    context_pct: float | None = None
+    tools_count: int = 0
+    tool_kinds: str | None = None
+    tools_fingerprint: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    response_format: str | None = None
+    injections: str | None = None
     shell_recovered: int = 0
     deduped: int = 0
     repeated_call: bool = False
@@ -187,6 +247,8 @@ class RequestRecorder:
         self._t0 = time.perf_counter()
         self._seq = 0
         self._phase: str | None = None
+        self._client: SupportsTurnTelemetry | None = None
+        self._injections: list[str] = []
         self.record = RequestRecord(
             id=request_id,
             ts=time.time(),
@@ -200,6 +262,65 @@ class RequestRecorder:
     def set_phase(self, phase: str | None) -> None:
         """标记后续 attempt 所属的 router 阶段（select/answer）。"""
         self._phase = phase
+
+    def observe(self, client: object) -> None:
+        """Attach the Copilot client whose per-turn facts each attempt absorbs."""
+        if isinstance(client, SupportsTurnTelemetry):
+            self._client = client
+
+    def set_request_shape(
+        self,
+        *,
+        client_session_id: str | None = None,
+        client_agent: str | None = None,
+        project_path: str | None = None,
+        turn_kind: str | None = None,
+        messages_count: int = 0,
+        transcript_bytes: int = 0,
+        system_bytes: int = 0,
+        context_pct: float | None = None,
+        tools_count: int = 0,
+        tool_kinds: str | None = None,
+        tools_fingerprint: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_tokens: int | None = None,
+        response_format: str | None = None,
+    ) -> None:
+        """记录 OpenCode 侧的身份与请求形状（谁、哪个项目、多大上下文、哪些工具）。"""
+        try:
+            rec = self.record
+            rec.client_session_id = client_session_id
+            rec.client_agent = _truncate(client_agent, 160)
+            rec.project_path = project_path
+            rec.turn_kind = turn_kind
+            rec.messages_count = messages_count
+            rec.transcript_bytes = transcript_bytes
+            rec.system_bytes = system_bytes
+            rec.context_pct = context_pct
+            rec.tools_count = tools_count
+            rec.tool_kinds = tool_kinds
+            rec.tools_fingerprint = tools_fingerprint
+            rec.temperature = temperature
+            rec.top_p = top_p
+            rec.max_tokens = max_tokens
+            rec.response_format = response_format
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor set_request_shape failed", exc_info=True)
+
+    def set_context_pct(self, pct: float) -> None:
+        """记录 prompt 估算 token 占 M365 上下文上限的比例。"""
+        self.record.context_pct = round(pct, 4)
+
+    def add_injection(self, *names: str) -> None:
+        """追加本请求（及后续 attempt）实际注入的上下文部件名。"""
+        try:
+            for name in names:
+                if name and name not in self._injections:
+                    self._injections.append(name)
+            self.record.injections = ",".join(self._injections) or None
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor add_injection failed", exc_info=True)
 
     def attempt_timer(self) -> float:
         return time.perf_counter()
@@ -230,6 +351,7 @@ class RequestRecorder:
         name: str | None,
         is_error: bool,
         result_bytes: int,
+        head: str | None = None,
     ) -> None:
         """记录本次请求 transcript 里携带的工具执行结果，用于闭环配对。"""
         try:
@@ -239,6 +361,7 @@ class RequestRecorder:
                     name=name,
                     is_error=is_error,
                     result_bytes=result_bytes,
+                    head=_truncate(head, 512) if is_error else None,
                 )
             )
         except Exception:  # pragma: no cover - defensive
@@ -305,18 +428,21 @@ class RequestRecorder:
     ) -> None:
         try:
             self._seq += 1
-            self.record.attempts.append(
-                AttemptRecord(
-                    seq=self._seq,
-                    duration_ms=int((time.perf_counter() - started) * 1000),
-                    guard=guard,
-                    retried=retried,
-                    status=status,
-                    text=text,
-                    error_detail=_truncate(error_detail, 300),
-                    phase=self._phase,
-                )
+            attempt = AttemptRecord(
+                seq=self._seq,
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                guard=guard,
+                retried=retried,
+                status=status,
+                text=text,
+                error_detail=_truncate(error_detail, 300),
+                phase=self._phase,
+                injections=",".join(self._injections) or None,
             )
+            client = self._client
+            if client is not None and client.last_turn is not None:
+                attempt.absorb(client.last_turn)
+            self.record.attempts.append(attempt)
         except Exception:  # pragma: no cover - defensive
             logger.debug("monitor add_attempt failed", exc_info=True)
 
@@ -355,6 +481,11 @@ class RequestRecorder:
             # off 档、或 failures 档下的正常请求：不保留任何内容现场
             for attempt in rec.attempts:
                 attempt.text = None
+                attempt.final_frame = None
+                attempt.sent_head = None
+                attempt.sent_tail = None
+            for result in rec.tool_results:
+                result.head = None
             return
         rec.prompt_summary = _truncate(input_text)
         rec.reply_snippet = _truncate(output_text)
@@ -372,6 +503,18 @@ class _NullRecorder:
         return None
 
     def set_phase(self, phase: str | None) -> None:
+        return None
+
+    def observe(self, client: object) -> None:
+        return None
+
+    def set_request_shape(self, **kwargs) -> None:
+        return None
+
+    def set_context_pct(self, pct: float) -> None:
+        return None
+
+    def add_injection(self, *names: str) -> None:
         return None
 
     def record_tool_calls(self, calls: list[dict]) -> None:
@@ -446,7 +589,23 @@ class SQLiteSink:
                     shell_recovered INTEGER,
                     deduped INTEGER,
                     repeated_call INTEGER,
-                    repeated_failure INTEGER
+                    repeated_failure INTEGER,
+                    client_session_id TEXT,
+                    client_agent TEXT,
+                    project_path TEXT,
+                    turn_kind TEXT,
+                    messages_count INTEGER,
+                    transcript_bytes INTEGER,
+                    system_bytes INTEGER,
+                    context_pct REAL,
+                    tools_count INTEGER,
+                    tool_kinds TEXT,
+                    tools_fingerprint TEXT,
+                    temperature REAL,
+                    top_p REAL,
+                    max_tokens INTEGER,
+                    response_format TEXT,
+                    injections TEXT
                 )
                 """
             )
@@ -461,7 +620,8 @@ class SQLiteSink:
                     category TEXT,
                     args_bytes INTEGER,
                     result_error INTEGER,
-                    result_bytes INTEGER
+                    result_bytes INTEGER,
+                    result_head TEXT
                 )
                 """
             )
@@ -489,6 +649,21 @@ class SQLiteSink:
                     text TEXT,
                     error_detail TEXT,
                     phase TEXT,
+                    injections TEXT,
+                    conversation_id TEXT,
+                    client_request_id TEXT,
+                    sent_bytes INTEGER,
+                    first_frame_ms INTEGER,
+                    frames INTEGER,
+                    message_types TEXT,
+                    reply_bytes INTEGER,
+                    citations INTEGER,
+                    terminated_cleanly INTEGER,
+                    upstream_status INTEGER,
+                    close_reason TEXT,
+                    final_frame TEXT,
+                    sent_head TEXT,
+                    sent_tail TEXT,
                     PRIMARY KEY (request_id, seq)
                 )
                 """
@@ -521,11 +696,47 @@ class SQLiteSink:
                 "deduped": "INTEGER",
                 "repeated_call": "INTEGER",
                 "repeated_failure": "INTEGER",
+                "client_session_id": "TEXT",
+                "client_agent": "TEXT",
+                "project_path": "TEXT",
+                "turn_kind": "TEXT",
+                "messages_count": "INTEGER",
+                "transcript_bytes": "INTEGER",
+                "system_bytes": "INTEGER",
+                "context_pct": "REAL",
+                "tools_count": "INTEGER",
+                "tool_kinds": "TEXT",
+                "tools_fingerprint": "TEXT",
+                "temperature": "REAL",
+                "top_p": "REAL",
+                "max_tokens": "INTEGER",
+                "response_format": "TEXT",
+                "injections": "TEXT",
             },
         )
         self._add_missing_columns(
-            "attempts", {"error_detail": "TEXT", "phase": "TEXT"}
+            "attempts",
+            {
+                "error_detail": "TEXT",
+                "phase": "TEXT",
+                "injections": "TEXT",
+                "conversation_id": "TEXT",
+                "client_request_id": "TEXT",
+                "sent_bytes": "INTEGER",
+                "first_frame_ms": "INTEGER",
+                "frames": "INTEGER",
+                "message_types": "TEXT",
+                "reply_bytes": "INTEGER",
+                "citations": "INTEGER",
+                "terminated_cleanly": "INTEGER",
+                "upstream_status": "INTEGER",
+                "close_reason": "TEXT",
+                "final_frame": "TEXT",
+                "sent_head": "TEXT",
+                "sent_tail": "TEXT",
+            },
         )
+        self._add_missing_columns("tool_calls", {"result_head": "TEXT"})
 
     def _add_missing_columns(self, table: str, wanted: dict[str, str]) -> None:
         existing = {
@@ -549,8 +760,15 @@ class SQLiteSink:
                     error, error_type, prompt_summary, reply_snippet,
                     first_chunk_ms, chunk_count, avg_chunk_interval_ms,
                     stream_complete, had_tools, planning_mode, reasoning_effort,
-                    shell_recovered, deduped, repeated_call, repeated_failure
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    shell_recovered, deduped, repeated_call, repeated_failure,
+                    client_session_id, client_agent, project_path, turn_kind,
+                    messages_count, transcript_bytes, system_bytes, context_pct,
+                    tools_count, tool_kinds, tools_fingerprint, temperature,
+                    top_p, max_tokens, response_format, injections
+                ) VALUES (
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                )
                 """,
                 (
                     rec.id,
@@ -580,6 +798,22 @@ class SQLiteSink:
                     rec.deduped,
                     1 if rec.repeated_call else 0,
                     1 if rec.repeated_failure else 0,
+                    rec.client_session_id,
+                    rec.client_agent,
+                    rec.project_path,
+                    rec.turn_kind,
+                    rec.messages_count,
+                    rec.transcript_bytes,
+                    rec.system_bytes,
+                    rec.context_pct,
+                    rec.tools_count,
+                    rec.tool_kinds,
+                    rec.tools_fingerprint,
+                    rec.temperature,
+                    rec.top_p,
+                    rec.max_tokens,
+                    rec.response_format,
+                    rec.injections,
                 ),
             )
             for call in rec.tool_calls:
@@ -608,13 +842,21 @@ class SQLiteSink:
                     """
                     INSERT OR REPLACE INTO attempts (
                         request_id, seq, duration_ms, guard, retried, status,
-                        text, error_detail, phase
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                        text, error_detail, phase, injections, conversation_id,
+                        client_request_id, sent_bytes, first_frame_ms, frames,
+                        message_types, reply_bytes, citations, terminated_cleanly,
+                        upstream_status, close_reason, final_frame, sent_head,
+                        sent_tail
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         rec.id, a.seq, a.duration_ms, a.guard,
                         1 if a.retried else 0, a.status, a.text,
-                        a.error_detail, a.phase,
+                        a.error_detail, a.phase, a.injections, a.conversation_id,
+                        a.client_request_id, a.sent_bytes, a.first_frame_ms,
+                        a.frames, a.message_types, a.reply_bytes, a.citations,
+                        _flag(a.terminated_cleanly), a.upstream_status,
+                        a.close_reason, a.final_frame, a.sent_head, a.sent_tail,
                     ),
                 )
         self._writes += 1
@@ -627,9 +869,9 @@ class SQLiteSink:
         error_flag = 1 if result.is_error else 0
         if result.call_id:
             cursor = self._conn.execute(
-                "UPDATE tool_calls SET result_error = ?, result_bytes = ? "
-                "WHERE call_id = ? AND result_bytes IS NULL",
-                (error_flag, result.result_bytes, result.call_id),
+                "UPDATE tool_calls SET result_error = ?, result_bytes = ?, "
+                "result_head = ? WHERE call_id = ? AND result_bytes IS NULL",
+                (error_flag, result.result_bytes, result.head, result.call_id),
             )
             if cursor.rowcount:
                 return
@@ -648,9 +890,9 @@ class SQLiteSink:
         ).fetchone()
         if row:
             self._conn.execute(
-                "UPDATE tool_calls SET result_error = ?, result_bytes = ? "
-                "WHERE call_id = ?",
-                (error_flag, result.result_bytes, row[0]),
+                "UPDATE tool_calls SET result_error = ?, result_bytes = ?, "
+                "result_head = ? WHERE call_id = ?",
+                (error_flag, result.result_bytes, result.head, row[0]),
             )
 
     def _derive_events(self, rec: RequestRecord) -> None:
@@ -733,19 +975,53 @@ class SQLiteSink:
         finally:
             conn.close()
 
-    def requests(self, limit: int = 50, session: str | None = None) -> list[dict]:
+    def requests(
+        self,
+        limit: int = 50,
+        session: str | None = None,
+        project: str | None = None,
+        turn_kind: str | None = None,
+    ) -> list[dict]:
         conn = self._readonly_conn()
         try:
+            clauses: list[str] = []
+            params: list[object] = []
             if session:
-                rows = conn.execute(
-                    "SELECT * FROM requests WHERE session_key = ? ORDER BY ts DESC LIMIT ?",
-                    (session, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM requests ORDER BY ts DESC LIMIT ?", (limit,)
-                ).fetchall()
+                clauses.append("(session_key = ? OR client_session_id = ?)")
+                params.extend([session, session])
+            if project:
+                clauses.append("project_path = ?")
+                params.append(project)
+            if turn_kind:
+                clauses.append("turn_kind = ?")
+                params.append(turn_kind)
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            rows = conn.execute(
+                f"SELECT * FROM requests{where} ORDER BY ts DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def context_pressure(self, limit: int = 200) -> list[dict]:
+        """上下文压力时间线：每个请求的 prompt tokens/占比与 transcript 体积。
+
+        用来看清上下文如何随会话增长、在哪一轮被压缩，以及压力与失败的相关性。
+        """
+        conn = self._readonly_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, ts, session_key, client_session_id, project_path,
+                       turn_kind, prompt_tokens, context_pct, transcript_bytes,
+                       system_bytes, messages_count, tools_count, status, guard
+                FROM requests ORDER BY ts DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in reversed(rows)]
         finally:
             conn.close()
 
@@ -974,9 +1250,7 @@ class SQLiteSink:
             detail["attempts"] = [
                 dict(a)
                 for a in conn.execute(
-                    "SELECT seq, duration_ms, guard, retried, status, text, "
-                    "error_detail, phase "
-                    "FROM attempts WHERE request_id = ? ORDER BY seq",
+                    "SELECT * FROM attempts WHERE request_id = ? ORDER BY seq",
                     (request_id,),
                 ).fetchall()
             ]

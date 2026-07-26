@@ -19,6 +19,7 @@ from teams_copilot_proxy.substrate_client import (
     SubstrateCopilotError,
     SubstrateThrottledError,
 )
+from teams_copilot_proxy.telemetry import TurnTelemetry
 
 AUTH = {"Authorization": "Bearer fake-token"}
 
@@ -701,9 +702,210 @@ def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
                 "PRAGMA table_info(attempts)"
             ).fetchall()
         }
-        assert {"error_detail", "phase"} <= attempt_columns
+        assert {
+            "error_detail",
+            "phase",
+            "injections",
+            "conversation_id",
+            "client_request_id",
+            "sent_bytes",
+            "first_frame_ms",
+            "frames",
+            "message_types",
+            "reply_bytes",
+            "citations",
+            "terminated_cleanly",
+            "upstream_status",
+            "close_reason",
+            "final_frame",
+            "sent_head",
+            "sent_tail",
+        } <= attempt_columns
+        assert {
+            "client_session_id",
+            "client_agent",
+            "project_path",
+            "turn_kind",
+            "messages_count",
+            "transcript_bytes",
+            "system_bytes",
+            "context_pct",
+            "tools_count",
+            "tool_kinds",
+            "tools_fingerprint",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "response_format",
+            "injections",
+        } <= columns
     finally:
         sink.close()
+
+
+class TelemetryCopilotClient(FakeCopilotClient):
+    """Fake client that publishes substrate round-trip facts like the real one."""
+
+    def __init__(self) -> None:
+        self.last_turn: TurnTelemetry | None = None
+
+    async def chat(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> str:
+        turn = TurnTelemetry(
+            conversation_id="conv-123",
+            client_request_id="req-abc",
+            frames=4,
+            first_frame_ms=250,
+            reply_bytes=13,
+            citations=2,
+            terminated_cleanly=True,
+            message_types=["Progress", "Chat"],
+        )
+        turn.mark_sent("x" * 3000)
+        self.last_turn = turn
+        return "copilot reply"
+
+
+OPENCODE_HEADERS = {
+    "x-session-id": "ses_opencode_1",
+    "user-agent": "opencode/1.18.5",
+}
+
+
+def opencode_chat(client: TestClient, **extra) -> dict:
+    body = {
+        "model": "claude-sonnet",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Working directory: /srv/boss-cli\nBe terse.",
+            },
+            {"role": "user", "content": "Read main.py"},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "tools": SAMPLE_TOOLS,
+    }
+    body.update(extra)
+    response = client.post(
+        "/v1/chat/completions", json=body, headers={**AUTH, **OPENCODE_HEADERS}
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_request_records_opencode_identity_and_shape(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY]), tmp_path
+    )
+    opencode_chat(client)
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["client_session_id"] == "ses_opencode_1"
+    assert entry["client_agent"] == "opencode/1.18.5"
+    assert entry["project_path"] == "/srv/boss-cli"
+    assert entry["turn_kind"] == "tool"
+    assert entry["messages_count"] == 2
+    assert entry["transcript_bytes"] > 0
+    assert entry["system_bytes"] > 0
+    assert 0 < entry["context_pct"] < 1
+    assert entry["tools_count"] == len(SAMPLE_TOOLS)
+    assert entry["tool_kinds"] == "builtin:1"
+    assert entry["tools_fingerprint"]
+    assert entry["temperature"] == 0.2
+    assert entry["top_p"] == 0.9
+    assert entry["max_tokens"] == 4096
+    assert "tool_protocol" in entry["injections"]
+    assert "system_sanitized" in entry["injections"]
+
+
+def test_attempt_records_upstream_turn_facts(tmp_path) -> None:
+    client = build_monitor_client(TelemetryCopilotClient(), tmp_path)
+    chat(client)
+
+    req_id = client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = client.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    assert attempt["conversation_id"] == "conv-123"
+    assert attempt["client_request_id"] == "req-abc"
+    assert attempt["frames"] == 4
+    assert attempt["first_frame_ms"] == 250
+    assert attempt["message_types"] == "Progress,Chat"
+    assert attempt["reply_bytes"] == 13
+    assert attempt["citations"] == 2
+    assert attempt["terminated_cleanly"] == 1
+    assert attempt["sent_bytes"] == 3000
+
+
+def test_upstream_prompt_capture_is_gated_by_capture_mode(tmp_path) -> None:
+    default_client = build_monitor_client(TelemetryCopilotClient(), tmp_path)
+    chat(default_client)
+    req_id = default_client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = default_client.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    # capture=failures（默认）+ 请求成功 -> 只留事实，不留 prompt/帧现场
+    assert attempt["sent_head"] is None
+    assert attempt["sent_tail"] is None
+    assert attempt["frames"] == 4
+
+    verbose_dir = tmp_path / "all"
+    verbose_dir.mkdir()
+    verbose = build_monitor_client(
+        TelemetryCopilotClient(),
+        verbose_dir,
+        M365_MONITOR_CAPTURE="all",
+    )
+    chat(verbose)
+    req_id = verbose.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = verbose.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    assert attempt["sent_head"]
+    assert attempt["sent_tail"]
+
+
+def test_requests_can_be_filtered_by_project_and_turn_kind(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY, "plain answer"]), tmp_path
+    )
+    opencode_chat(client)
+    chat(client)  # 普通 chat 轮（无工具、无 project）
+
+    filtered = client.get(
+        "/monitor/api/requests?project=/srv/boss-cli&turn_kind=tool", headers=AUTH
+    ).json()["requests"]
+    assert len(filtered) == 1
+    assert filtered[0]["project_path"] == "/srv/boss-cli"
+    by_session = client.get(
+        "/monitor/api/requests?session=ses_opencode_1", headers=AUTH
+    ).json()["requests"]
+    assert len(by_session) == 1
+
+
+def test_context_pressure_endpoint_reports_growth(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY]), tmp_path
+    )
+    opencode_chat(client)
+
+    rows = client.get("/monitor/api/context-pressure", headers=AUTH).json()[
+        "requests"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["prompt_tokens"] > 0
+    assert row["context_pct"] > 0
+    assert row["project_path"] == "/srv/boss-cli"
 
 
 def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:
