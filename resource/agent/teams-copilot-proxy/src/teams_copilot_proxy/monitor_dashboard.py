@@ -1,8 +1,8 @@
-"""只读 Monitor 面板：单页 HTML，浏览器端轮询 /monitor/api/*。
+"""Monitor 面板：单页 HTML，浏览器端轮询 /monitor/api/*。
 
 回环客户端（127.0.0.1）默认免 Bearer 直连，页面顶部显示当前 substrate token
 状态（掩码 + 过期时间）并提供一键复制；非回环访问仍需输入 Bearer token
-（存 localStorage）。纯只读——无配置修改、无清库、无导出。
+（存 localStorage）。面板提供一键清空调试数据按钮，无配置修改、无导出。
 """
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -46,6 +46,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </nav>
   <span id="tokeninfo" class="muted" style="margin-left:auto;font-size:12px"></span>
   <button id="copytoken" style="display:none;background:#274b73;color:#cde;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px" onclick="copyToken()">copy token</button>
+  <button id="cleardb" style="background:#c62828;color:#fff;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px" onclick="clearDB()">clear db</button>
   <span id="status" class="muted" style="font-size:12px"></span>
 </header>
 <div id="tokenbar">
@@ -96,6 +97,23 @@ async function copyToken() {
     setTimeout(() => { btn.textContent = 'copy token'; }, 1500);
   } catch (e) {
     document.getElementById('status').textContent = 'copy failed: ' + e.message;
+  }
+}
+async function clearDB() {
+  if (!confirm('Clear all monitor data? This cannot be undone.')) return;
+  try {
+    const res = await fetch('/monitor/api/clear', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token() }
+    });
+    if (res.status === 401) { document.getElementById('tokenbar').style.display = 'block'; throw new Error('unauthorized'); }
+    if (!res.ok) throw new Error('http ' + res.status);
+    const d = await res.json();
+    document.getElementById('status').textContent =
+      `cleared requests=${d.requests} attempts=${d.attempts} tool_calls=${d.tool_calls} events=${d.events}`;
+    await refresh();
+  } catch (e) {
+    document.getElementById('status').textContent = 'clear failed: ' + e.message;
   }
 }
 function card(k, v) { return `<div class="card"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`; }

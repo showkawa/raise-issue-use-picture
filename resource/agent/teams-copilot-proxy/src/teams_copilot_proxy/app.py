@@ -604,6 +604,13 @@ def create_app(
         monitor.flush()
         return {"errors": monitor.sink.errors(limit=limit)}
 
+    @app.post("/monitor/api/clear")
+    async def monitor_clear(raw_request: Request) -> dict:
+        """清空调试面板所有监控数据（requests/attempts/tool_calls/events），需 Bearer token。"""
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return monitor.sink.clear()
+
     @app.get("/monitor/api/sessions/{session_key}")
     async def monitor_session(raw_request: Request, session_key: str) -> dict:
         monitor = require_monitor(raw_request)

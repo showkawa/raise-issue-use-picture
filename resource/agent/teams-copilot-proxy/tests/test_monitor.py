@@ -932,3 +932,25 @@ def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:
     ids = [r["id"] for r in sink.requests(limit=10)]
     assert ids == ["req-fresh"]
     sink.close()
+
+
+def test_clear_endpoint_wipes_all_monitor_data(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client)
+    assert client.get("/monitor/api/summary", headers=AUTH).json()["requests"] == 1
+
+    cleared = client.post("/monitor/api/clear", headers=AUTH).json()
+    assert cleared["requests"] == 1
+    assert cleared["attempts"] >= 1
+
+    assert client.get("/monitor/api/summary", headers=AUTH).json()["requests"] == 0
+    assert client.get("/monitor/api/requests", headers=AUTH).json()["requests"] == []
+
+
+def test_clear_endpoint_requires_auth(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert client.post("/monitor/api/clear").status_code == 401
+    assert (
+        client.post("/monitor/api/clear", headers={"Authorization": "Bearer wrong"}).status_code
+        == 401
+    )

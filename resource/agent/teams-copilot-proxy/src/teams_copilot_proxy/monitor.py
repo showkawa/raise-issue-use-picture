@@ -1258,6 +1258,20 @@ class SQLiteSink:
         finally:
             conn.close()
 
+    def clear(self) -> dict[str, int]:
+        """清空 sqlite 中所有监控表，返回各表删除行数。"""
+        with self._lock, self._conn:
+            requests = self._conn.execute("DELETE FROM requests").rowcount
+            attempts = self._conn.execute("DELETE FROM attempts").rowcount
+            tool_calls = self._conn.execute("DELETE FROM tool_calls").rowcount
+            events = self._conn.execute("DELETE FROM events").rowcount
+        return {
+            "requests": requests,
+            "attempts": attempts,
+            "tool_calls": tool_calls,
+            "events": events,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
