@@ -232,7 +232,7 @@ async function showDetail(id) {
       + `<td>${a.upstream_status ?? ''}</td><td>${esc(a.close_reason || '')}</td>`
       + `<td>${esc(a.injections || '')}</td></tr>`
       + (a.final_frame ? `<tr><td></td><td colspan="12"><pre>${esc(a.final_frame)}</pre></td></tr>` : '')
-      + (a.sent_head ? `<tr><td></td><td colspan="12"><pre>${esc(a.sent_head)}${a.sent_tail ? '\n…\n' + esc(a.sent_tail) : ''}</pre></td></tr>` : '')
+      + (a.sent_head ? `<tr><td></td><td colspan="12"><pre>${esc(a.sent_head)}${a.sent_tail ? '\\n…\\n' + esc(a.sent_tail) : ''}</pre></td></tr>` : '')
     ).join('') + '</table>';
   box.innerHTML = html;
   box.style.display = 'block';
