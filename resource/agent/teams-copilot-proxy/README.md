@@ -20,6 +20,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
   - [Manual Fallback](#manual-fallback)
   - [Health](#health)
 - [API Endpoints](#api-endpoints)
+- [Monitor](#monitor)
 - [Environment Variables](#environment-variables)
 - [Security Notes](#security-notes)
 - [Limitations](#limitations)
@@ -39,6 +40,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Startup capability probe: tests candidate tones and a fenced tool probe, tiers the deployment T1 (Claude + reliable tools) or T3 (best-effort tools), cached for 24h and reported on `/healthz`
 - Guard layer for tool turns: detects confabulation ("I can't access your files"), hallucinated completion, safety-filter disengagement, and upstream throttling; shares a per-request retry budget and reports honestly via an `x_m365_guard` field instead of faking tool success
 - Streaming with tools: immediate HTTP 200, `: keepalive` comments while Copilot thinks, then typewriter-style chunked delivery of plain-text answers (tool calls stay atomic)
+- Built-in read-only Monitor (`/monitor`): request/attempt tracing, token usage, tool-call closure stats, guard/substrate error timeline, and per-session aggregation, backed by a local SQLite file
 
 ## Quick Start
 
@@ -231,8 +233,31 @@ Example:
 | `GET /v1/token/status` | Token validity, expiry time, and seconds remaining |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `POST /v1/chat/completions` | OpenAI Chat Completions (the endpoint OpenCode uses), streaming and tool calling supported |
+| `GET /monitor` | Read-only monitoring dashboard (static page; data calls need the Bearer token) |
+| `GET /monitor/api/summary` | Aggregate counters: requests, tokens, error/guard rates, tone breakdown |
+| `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=`) |
+| `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
+| `GET /monitor/api/tools` | Tool-call ranking with closure status and error rate |
+| `GET /monitor/api/errors` | Guard and substrate error timeline (newest first) |
+| `GET /monitor/api/sessions/{key}` | Per-session totals plus request/tool/event streams |
 
 `GET /healthz` also reports the startup probe result when available, e.g. `"capability": {"tier": "T1", "tone": "Claude_Sonnet", ...}`.
+
+## Monitor
+
+The proxy ships a self-hosted monitor for diagnosing OpenCode instability (fake tool completions, guard retries, throttling, slow streams) without any external service. Every `/v1/chat/completions` request is recorded to a local SQLite file (WAL mode) through a bounded in-process queue — if the queue is full events are dropped with a warning; monitoring can never block or fail a chat request.
+
+What is recorded:
+
+- **Requests:** model, tone, session key, stream flag, estimated token usage, duration, final status (`ok` / `guard` / `error`).
+- **Attempt chain:** every substrate round trip inside one request (original reply → guard trigger → correction retry → final outcome) with per-attempt duration and guard type.
+- **Tool closure:** tool_calls the model emits are classified (builtin / mcp / skill / task / todowrite / webfetch) and paired with the `Tool result` OpenCode sends on the next turn — only an error flag and byte count, never the result body.
+- **Stream health:** first-chunk latency, chunk count, average interval, and `[DONE]` completeness as aggregates (no per-chunk rows).
+- **Error timeline:** guard hits, throttling, disengagement, and other upstream failures.
+
+Capture policy (`M365_MONITOR_CAPTURE`): `failures` (default) keeps redacted prompt/reply excerpts (~2 KB each) only for failed or guard-triggered requests; `all` keeps them for every request; `off` stores metadata only. Rows older than `M365_MONITOR_RETENTION_DAYS` (default 30) are cleaned up automatically.
+
+Open `http://127.0.0.1:8000/monitor` for the read-only dashboard (Summary / Requests with attempt-chain drill-down / Errors). The page asks for the Bearer token once and keeps it in `localStorage`; the token is `M365_MONITOR_TOKEN` if set, otherwise the current `M365_ACCESS_TOKEN`. Sessions are grouped by an `x-session-id` request header when present, otherwise by a hash of the conversation's first user message.
 
 ## Environment Variables
 
@@ -256,6 +281,11 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_SANITIZE_SYSTEM_PROMPT_WITH_TOOLS` | `true` | Optional. When on, neutralizes OpenCode's competing-identity assertions and merges the rest of the system prompt into tool-turn requests, so the Copilot channel keeps the engineering guidance while still emitting tool calls. Requests without tools are unaffected. |
 | `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` | `false` | Optional. When on, drops the OpenCode system prompt entirely on requests that carry `tools`. Superseded by the sanitize-merge behavior above; leave off unless you specifically want the old drop-everything behavior. |
 | `M365_ALLOW_PARALLEL_TOOL_CALLS` | `false` | Optional. When on, the tool protocol permits several `tool_call` blocks in one reply and the proxy emits them all as OpenAI `tool_calls`. Default off keeps the single-tool-per-turn path, which is the most reliable on the Claude tone. |
+| `M365_MONITOR_ENABLED` | `true` | Optional. Turns the built-in monitor on/off. When off, `/monitor` endpoints return 404 and nothing is recorded. |
+| `M365_MONITOR_DB_PATH` | `monitor.db` | Optional. SQLite file for monitor data (WAL mode, single file plus `-wal`/`-shm`). |
+| `M365_MONITOR_CAPTURE` | `failures` | Optional. Content capture policy: `off` (metadata only), `failures` (excerpts only for failed/guard-triggered requests), `all`. |
+| `M365_MONITOR_RETENTION_DAYS` | `30` | Optional. Monitor rows older than this are deleted automatically. |
+| `M365_MONITOR_TOKEN` | unset | Optional. Separate Bearer token for `/monitor/api/*`; falls back to `M365_ACCESS_TOKEN` when empty. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 
 ## Security Notes

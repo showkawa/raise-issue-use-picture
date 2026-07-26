@@ -429,6 +429,23 @@ def test_tool_category_buckets() -> None:
     assert tool_category("somethingelse") == "other"
 
 
+def test_dashboard_page_served_when_enabled(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    response = client.get("/monitor")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    # 静态壳：不含任何监控数据，数据请求由浏览器带 Bearer token 拉取
+    assert "Teams Copilot Proxy Monitor" in response.text
+    assert "localStorage" in response.text
+
+
+def test_dashboard_404_when_monitor_disabled(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, M365_MONITOR_ENABLED=False
+    )
+    assert client.get("/monitor").status_code == 404
+
+
 def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:
     sink = SQLiteSink(str(tmp_path / "monitor.db"), retention_days=30)
     old = RequestRecord(

@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,6 +50,7 @@ from .monitor import (
     SQLiteSink,
     _NullRecorder,
 )
+from .monitor_dashboard import DASHBOARD_HTML
 from .redaction import redact_outbound
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
@@ -381,6 +382,13 @@ def create_app(
             ],
             "usage": openai_usage(input_text, text),
         })
+
+    @app.get("/monitor", response_class=HTMLResponse)
+    async def monitor_dashboard() -> HTMLResponse:
+        """只读面板页面（静态壳，不含数据）；数据接口均需 Bearer token。"""
+        if app.state.monitor is None:
+            raise HTTPException(status_code=404, detail="monitor disabled")
+        return HTMLResponse(DASHBOARD_HTML)
 
     @app.get("/monitor/api/summary")
     async def monitor_summary(raw_request: Request) -> dict:
