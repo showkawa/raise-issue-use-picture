@@ -10,6 +10,18 @@ class ContentPart(BaseModel):
 
     type: str
     text: str | None = None
+    image_url: dict[str, Any] | None = None
+
+
+class ImageInput(BaseModel):
+    """An image extracted from a client request, ready to be uploaded to the
+    substrate's UploadFile endpoint and referenced via a message annotation."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    data_uri: str
+    filename: str = "image.png"
+    file_type: str = "png"
 
 
 class OpenAIToolCallFunction(BaseModel):
@@ -44,27 +56,36 @@ class OpenAIChatRequest(BaseModel):
     messages: list[OpenAIMessage]
     stream: bool = False
     temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    reasoning_effort: str | None = None
     user: str | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: Any = None
+    response_format: dict[str, Any] | None = None
 
 
-class AnthropicMessage(BaseModel):
+class SamplingParams(BaseModel):
+    """Decoding parameters OpenCode requests. The substrate chat channel exposes
+    no documented sampling knobs (the tone fixes the model and decoding), so these
+    are forwarded best-effort into the Chathub ``options`` object and may be
+    silently ignored upstream. Only fields the live channel is known to accept
+    without error are forwarded."""
+
     model_config = ConfigDict(extra="ignore")
 
-    role: Literal["user", "assistant"]
-    content: str | list[ContentPart]
-
-
-class AnthropicMessagesRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    model: str
-    messages: list[AnthropicMessage]
-    system: str | list[ContentPart] | None = None
-    stream: bool = False
-    max_tokens: int | None = None
     temperature: float | None = None
+    top_p: float | None = None
+
+    def as_options(self) -> dict[str, float]:
+        options: dict[str, float] = {}
+        if self.temperature is not None:
+            options["temperature"] = self.temperature
+        if self.top_p is not None:
+            options["topP"] = self.top_p
+        return options
 
 
 class CopilotMessage(BaseModel):
@@ -82,15 +103,10 @@ class CopilotConversation(BaseModel):
     messages: list[CopilotMessage] = Field(default_factory=list)
 
 
-class OpenAIResponsesRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    model: str
-    input: str | list[Any]
-    instructions: str | None = None
-    stream: bool = False
-
-
 class TranslatedRequest(BaseModel):
     prompt: str
     additional_context: list[str] = Field(default_factory=list)
+    images: list[ImageInput] = Field(default_factory=list)
+    sampling: SamplingParams = Field(default_factory=SamplingParams)
+    tools: list[dict[str, Any]] | None = None
+

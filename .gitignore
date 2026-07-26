@@ -3,3 +3,5 @@ dist/
 output/
 *.lockb
 .sisyphus/
+/**/docs/
+/**/issues/.probe_cache.json 

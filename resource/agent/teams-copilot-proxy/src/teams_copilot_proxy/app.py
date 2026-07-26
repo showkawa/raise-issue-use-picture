@@ -33,14 +33,12 @@ from .substrate_client import (
     SubstrateCopilotError,
     SubstrateDisengagedError,
     SubstrateThrottledError,
+    _combine_text,
 )
 from .token_store import AccessTokenStore
 from .models import (
-    AnthropicMessage,
-    AnthropicMessagesRequest,
     OpenAIChatRequest,
     OpenAIMessage,
-    OpenAIResponsesRequest,
     TranslatedRequest,
 )
 from .redaction import redact_outbound
@@ -49,14 +47,14 @@ from .tool_protocol import (
     ToolParseOutcome,
     correction_prompt,
     parse_model_output,
+    parse_model_output_multi,
     tool_names,
 )
 from .translator import (
     flatten_content,
-    translate_anthropic_request,
     translate_openai_request,
-    translate_responses_request,
 )
+from .usage import estimate_tokens, openai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -193,13 +191,25 @@ def create_app(
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
         try:
+            selected_tone = _tone_for_model(
+                request.model, effective_default_tone(settings)
+            )
+            allow_parallel = settings.allow_parallel_tool_calls or (
+                selected_tone
+                in {tone.strip() for tone in settings.parallel_tool_tones.split(",")}
+            )
             translated = translate_openai_request(
                 request,
                 settings.max_transcript_chars,
                 settings.suppress_system_prompt_with_tools,
+                settings.sanitize_system_prompt_with_tools,
+                allow_parallel,
+                settings.dedup_websearch,
             )
             translated = _redact_translated(translated, settings)
-            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
+            client.tone = selected_tone
+            client.images = translated.images
+            client.options = translated.sampling.as_options()
             session = _persistent_session(
                 app,
                 raw_request,
@@ -207,20 +217,30 @@ def create_app(
                 request.user,
                 _conversation_key(request.messages),
             )
+            input_text = _combine_text(
+                translated.prompt, translated.additional_context
+            )
+            if settings.context_limit and estimate_tokens(input_text) > settings.context_limit:
+                raise ValueError(
+                    f"Estimated prompt tokens {estimate_tokens(input_text)} exceed "
+                    f"the M365 Copilot context limit ({settings.context_limit})."
+                )
             if request.stream:
-                if request.tools:
+                if translated.tools:
                     return StreamingResponse(
                         _openai_stream_with_tools(
                             settings.model_alias,
                             client,
                             translated.prompt,
                             translated.additional_context,
-                            request.tools,
+                            translated.tools,
                             session,
                             settings.tool_correction_retries,
+                            allow_parallel=allow_parallel,
                             keepalive_interval=settings.stream_keepalive_interval_s,
                             chunk_chars=settings.stream_chunk_chars,
                             chunk_delay_ms=settings.stream_chunk_delay_ms,
+                            input_text=input_text,
                         ),
                         media_type="text/event-stream",
                     )
@@ -231,19 +251,27 @@ def create_app(
                         translated.prompt,
                         translated.additional_context,
                         session,
+                        input_text=input_text,
                     ),
                     media_type="text/event-stream",
                 )
-            if request.tools:
+            if translated.tools:
                 outcome = await _chat_resolving_tools(
                     client,
                     translated.prompt,
                     translated.additional_context,
-                    request.tools,
+                    translated.tools,
                     session,
                     settings.tool_correction_retries,
+                    allow_parallel,
                 )
-                return JSONResponse(_tool_outcome_completion(settings.model_alias, outcome))
+                return JSONResponse(
+                    _tool_outcome_completion(
+                        settings.model_alias,
+                        outcome,
+                        _combine_text(translated.prompt, translated.additional_context),
+                    )
+                )
             text = await client.chat(translated.prompt, translated.additional_context, session)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -262,89 +290,9 @@ def create_app(
                     "finish_reason": "stop",
                 }
             ],
-        })
-
-    @app.post("/v1/responses")
-    async def openai_responses(
-        raw: Request,
-        settings: Settings = Depends(get_settings),
-        client: SubstrateCopilotClient = Depends(get_copilot_client),
-    ):
-        body = await raw.json()
-        try:
-            request = OpenAIResponsesRequest.model_validate(body)
-            translated = translate_responses_request(request)
-            translated = _redact_translated(translated, settings)
-            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
-            session = _persistent_session(app, raw, request.model)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        if request.stream:
-            return StreamingResponse(
-                _responses_stream(settings.model_alias, client, translated.prompt, translated.additional_context, session),
-                media_type="text/event-stream",
-            )
-
-        try:
-            text = await client.chat(translated.prompt, translated.additional_context, session)
-        except SubstrateCopilotError as exc:
-            raise _upstream_http_error(exc) from exc
-
-        return JSONResponse({
-            "id": f"resp_{uuid.uuid4().hex}",
-            "object": "response",
-            "created_at": int(time.time()),
-            "model": settings.model_alias,
-            "output": [{
-                "type": "message",
-                "id": f"msg_{uuid.uuid4().hex}",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
-            }],
-            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-        })
-
-    @app.post("/v1/messages")
-    async def anthropic_messages(
-        raw_request: Request,
-        request: AnthropicMessagesRequest,
-        settings: Settings = Depends(get_settings),
-        client: SubstrateCopilotClient = Depends(get_copilot_client),
-    ):
-        try:
-            translated = translate_anthropic_request(request)
-            translated = _redact_translated(translated, settings)
-            client.tone = _tone_for_model(request.model, effective_default_tone(settings))
-            session = _persistent_session(
-                app,
-                raw_request,
-                request.model,
-                derived_key=_conversation_key(request.messages),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        if request.stream:
-            return StreamingResponse(
-                _anthropic_stream(settings.model_alias, client, translated.prompt, translated.additional_context, session),
-                media_type="text/event-stream",
-            )
-
-        try:
-            text = await client.chat(translated.prompt, translated.additional_context, session)
-        except SubstrateCopilotError as exc:
-            raise _upstream_http_error(exc) from exc
-
-        return JSONResponse({
-            "id": f"msg_{uuid.uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": settings.model_alias,
-            "content": [{"type": "text", "text": text}],
-            "stop_reason": "end_turn",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": openai_usage(
+                _combine_text(translated.prompt, translated.additional_context), text
+            ),
         })
 
     return app
@@ -356,7 +304,13 @@ def _redact_translated(translated: TranslatedRequest, settings: Settings) -> Tra
     prompt, additional_context = redact_outbound(
         translated.prompt, translated.additional_context
     )
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
+    return TranslatedRequest(
+        prompt=prompt,
+        additional_context=additional_context,
+        images=translated.images,
+        sampling=translated.sampling,
+        tools=translated.tools,
+    )
 
 
 def _persistent_session(
@@ -390,7 +344,7 @@ def _persistent_session(
 def _conversation_key(messages: Sequence[object]) -> str | None:
     """Stable per-conversation key: hash of the first user message's text."""
     for message in messages:
-        if isinstance(message, (OpenAIMessage, AnthropicMessage)) and message.role == "user":
+        if isinstance(message, OpenAIMessage) and message.role == "user":
             text = flatten_content(message.content).strip()
         else:
             continue
@@ -406,8 +360,15 @@ async def _chat_resolving_tools(
     tools: list[dict],
     session: PersistentSession | None = None,
     max_corrections: int = 1,
+    allow_parallel: bool = False,
 ) -> ToolParseOutcome:
     allowed = tool_names(tools)
+    parse = parse_model_output_multi if allow_parallel else parse_model_output
+    # Completion claims are only hallucinations when no tool has actually run yet;
+    # after real tool results a "created/updated the file" summary is legitimate.
+    tools_have_run = "Tool result (" in prompt or any(
+        "Tool result (" in ctx for ctx in additional_context
+    )
     budget = max(0, min(max_corrections, 2))
     used = 0
     attempt_prompt = prompt
@@ -423,13 +384,13 @@ async def _chat_resolving_tools(
                 attempt_context = additional_context
                 continue
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
-        outcome = parse_model_output(text, allowed)
+        outcome = parse(text, allowed)
         if outcome.error is None:
             if outcome.tool_call is None and outcome.text:
                 triggered = None
                 if detect_confabulation(outcome.text):
                     triggered = CONFABULATION
-                elif detect_hallucinated_completion(outcome.text):
+                elif not tools_have_run and detect_hallucinated_completion(outcome.text):
                     triggered = HALLUCINATED_COMPLETION
                 if triggered is not None:
                     if used < budget:
@@ -448,12 +409,19 @@ async def _chat_resolving_tools(
         return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 
 
-def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dict:
-    if outcome.tool_call is not None:
+def _tool_outcome_completion(
+    model_alias: str, outcome: ToolParseOutcome, input_text: str = ""
+) -> dict:
+    completion_text = outcome.text or ""
+    if outcome.tool_calls:
+        calls = [tc.as_openai() for tc in outcome.tool_calls]
+        completion_text = completion_text + "".join(
+            c["function"]["arguments"] for c in calls
+        )
         message = {
             "role": "assistant",
             "content": outcome.text or None,
-            "tool_calls": [outcome.tool_call.as_openai()],
+            "tool_calls": calls,
         }
         finish_reason = "tool_calls"
     else:
@@ -471,6 +439,7 @@ def _tool_outcome_completion(model_alias: str, outcome: ToolParseOutcome) -> dic
                 "finish_reason": finish_reason,
             }
         ],
+        "usage": openai_usage(input_text, completion_text),
     }
     if outcome.guard:
         body["x_m365_guard"] = {"guard": outcome.guard, "retries_exhausted": True}
@@ -491,9 +460,11 @@ async def _openai_stream_with_tools(
     tools: list[dict],
     session: PersistentSession | None = None,
     max_corrections: int = 1,
+    allow_parallel: bool = False,
     keepalive_interval: float = 15.0,
     chunk_chars: int = 24,
     chunk_delay_ms: int = 0,
+    input_text: str = "",
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -513,7 +484,13 @@ async def _openai_stream_with_tools(
     yield chunk({"role": "assistant"})
     resolve_task = asyncio.create_task(
         _chat_resolving_tools(
-            client, prompt, additional_context, tools, session, max_corrections
+            client,
+            prompt,
+            additional_context,
+            tools,
+            session,
+            max_corrections,
+            allow_parallel,
         )
     )
     try:
@@ -530,21 +507,25 @@ async def _openai_stream_with_tools(
             yield "data: [DONE]\n\n"
             return
 
-        if outcome.tool_call is not None:
-            call = outcome.tool_call.as_openai()
+        if outcome.tool_calls:
+            calls = [tc.as_openai() for tc in outcome.tool_calls]
             if outcome.text:
                 yield chunk({"content": outcome.text})
             yield chunk({
                 "tool_calls": [
                     {
-                        "index": 0,
+                        "index": index,
                         "id": call["id"],
                         "type": "function",
                         "function": call["function"],
                     }
+                    for index, call in enumerate(calls)
                 ]
             })
-            yield chunk({}, "tool_calls")
+            completion_text = (outcome.text or "") + "".join(
+                c["function"]["arguments"] for c in calls
+            )
+            yield chunk({}, "tool_calls", {"usage": openai_usage(input_text, completion_text)})
         else:
             if outcome.text:
                 pieces = (
@@ -556,11 +537,9 @@ async def _openai_stream_with_tools(
                     if index and chunk_delay_ms > 0:
                         await asyncio.sleep(chunk_delay_ms / 1000)
                     yield chunk({"content": piece})
-            extra = (
-                {"x_m365_guard": {"guard": outcome.guard, "retries_exhausted": True}}
-                if outcome.guard
-                else None
-            )
+            extra = {"usage": openai_usage(input_text, outcome.text or "")}
+            if outcome.guard:
+                extra["x_m365_guard"] = {"guard": outcome.guard, "retries_exhausted": True}
             yield chunk({}, "stop", extra)
         yield "data: [DONE]\n\n"
     finally:
@@ -574,9 +553,11 @@ async def _openai_stream(
     prompt: str,
     additional_context: list[str],
     session: PersistentSession | None = None,
+    input_text: str = "",
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
+    full_text = ""
     first_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -587,6 +568,7 @@ async def _openai_stream(
     yield f"data: {json.dumps(first_chunk)}\n\n"
     try:
         async for delta in client.chat_stream(prompt, additional_context, session):
+            full_text += delta
             chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -605,62 +587,10 @@ async def _openai_stream(
         "created": created,
         "model": model_alias,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": openai_usage(input_text, full_text),
     }
     yield f"data: {json.dumps(final_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
 
-async def _responses_stream(
-    model_alias: str,
-    client: SubstrateCopilotClient,
-    prompt: str,
-    additional_context: list[str],
-    session: PersistentSession | None = None,
-) -> AsyncIterator[str]:
-    resp_id = f"resp_{uuid.uuid4().hex}"
-    item_id = f"msg_{uuid.uuid4().hex}"
-    created = int(time.time())
 
-    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'in_progress', 'output': []}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'content': []}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
-
-    full_text = ""
-    try:
-        async for delta in client.chat_stream(prompt, additional_context, session):
-            full_text += delta
-            yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': delta})}\n\n"
-    except SubstrateCopilotError as exc:
-        yield f"data: {json.dumps({'type': 'error', 'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
-        return
-
-    yield f"data: {json.dumps({'type': 'response.output_text.done', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'text': full_text})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'completed', 'output': [{'id': item_id, 'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': full_text}]}], 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}}})}\n\n"
-
-
-async def _anthropic_stream(
-    model_alias: str,
-    client: SubstrateCopilotClient,
-    prompt: str,
-    additional_context: list[str],
-    session: PersistentSession | None = None,
-) -> AsyncIterator[str]:
-    msg_id = f"msg_{uuid.uuid4().hex}"
-
-    def sse(event: str, data: dict) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-    yield sse("message_start", {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [], "model": model_alias, "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
-    yield sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-    yield sse("ping", {"type": "ping"})
-
-    try:
-        async for delta in client.chat_stream(prompt, additional_context, session):
-            yield sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta}})
-    except SubstrateCopilotError as exc:
-        yield sse("error", {"type": "error", "error": {"type": "upstream_error", "message": str(exc)}})
-        return
-
-    yield sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-    yield sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 0}})
-    yield sse("message_stop", {"type": "message_stop"})

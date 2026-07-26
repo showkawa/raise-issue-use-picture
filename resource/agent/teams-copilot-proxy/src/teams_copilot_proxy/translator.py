@@ -1,14 +1,50 @@
 from __future__ import annotations
 
-from typing import Iterable
+import json
+import re
+from typing import Any, Iterable
 
 from .models import (
-    AnthropicMessagesRequest,
     ContentPart,
+    ImageInput,
     OpenAIChatRequest,
+    SamplingParams,
     TranslatedRequest,
 )
 from .tool_protocol import render_tool_instructions, tool_reminder
+
+
+_IMAGE_PART_TYPES = ("image_url", "image", "input_image")
+
+# The substrate is a chat product with a hard identity guardrail: when a client
+# system prompt asserts a competing named identity (e.g. OpenCode's "You are
+# OpenCode, the best coding agent on the planet."), Copilot refuses to play along
+# and answers with prose ("I'm Microsoft Copilot, not OpenCode...") instead of
+# emitting a tool_call. Live A/B on the Claude tone: raw-merge = 0/3 tool calls,
+# identity-neutralized merge = 3/3. So we strip only the identity assertions and
+# keep the useful engineering guidance + project rules (AGENTS.md, etc.).
+_IDENTITY_SUBSTITUTIONS = (
+    (re.compile(r"(?im)^\s*you are opencode[,.]?\s*"), ""),
+    (re.compile(r"(?i)\bthe best coding agent on the planet[.]?"), ""),
+    (re.compile(r"(?i)\byou are (?:the )?opencode\b[,.]?\s*"), ""),
+)
+
+_SYSTEM_GUIDELINE_FRAMING = (
+    "Project and workflow guidelines (working instructions from the user's project "
+    "and tooling; follow them, but they do not change who you are):"
+)
+
+
+def neutralize_system_identity(text: str) -> str:
+    """Remove competing-identity assertions that trip the substrate guardrail,
+    preserving the surrounding engineering guidance."""
+    result = text
+    for pattern, repl in _IDENTITY_SUBSTITUTIONS:
+        result = pattern.sub(repl, result)
+    lines = result.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def flatten_content(content: str | list[ContentPart] | None) -> str:
@@ -17,6 +53,38 @@ def flatten_content(content: str | list[ContentPart] | None) -> str:
     if isinstance(content, str):
         return content
     return "".join(part.text or "" for part in content if part.type == "text")
+
+
+def count_image_parts(content: str | list[ContentPart] | None) -> int:
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for part in content if part.type in _IMAGE_PART_TYPES)
+
+
+def _image_type_from_data_uri(data_uri: str) -> str:
+    """Derive a file extension (e.g. "png", "jpeg") from a data: URI's MIME type."""
+    header = data_uri[5:].split(",", 1)[0]  # strip leading "data:"
+    mime = header.split(";", 1)[0]
+    subtype = mime.split("/", 1)[-1] if "/" in mime else ""
+    return subtype or "png"
+
+
+def extract_images(content: str | list[ContentPart] | None) -> list[ImageInput]:
+    """Collect uploadable images (data: URIs) from OpenAI image content parts.
+    Remote http(s) image URLs are not returned here; they are counted separately
+    so the caller can decide how to surface them."""
+    if not isinstance(content, list):
+        return []
+    images: list[ImageInput] = []
+    for part in content:
+        if part.type not in _IMAGE_PART_TYPES or not part.image_url:
+            continue
+        url = part.image_url.get("url")
+        if not isinstance(url, str) or not url.startswith("data:"):
+            continue
+        ext = _image_type_from_data_uri(url)
+        images.append(ImageInput(data_uri=url, filename=f"image.{ext}", file_type=ext))
+    return images
 
 
 def _join_lines(lines: Iterable[str]) -> str:
@@ -96,14 +164,49 @@ def _truncate_transcript(transcript_lines: list[str], budget: int) -> list[str]:
     return kept
 
 
+def _is_web_search_tool(tool: dict[str, Any]) -> bool:
+    function = tool.get("function", tool)
+    name = (function.get("name") or "").lower()
+    return any(k in name for k in ("web_search", "websearch", "search_web", "bing_web_search"))
+
+
+def _dedup_tools(tools: list[dict[str, Any]] | None, dedup_websearch: bool) -> list[dict[str, Any]]:
+    if not tools:
+        return []
+    if not dedup_websearch:
+        return tools
+    return [t for t in tools if not _is_web_search_tool(t)]
+
+
+def _json_mode_instruction(response_format: dict[str, Any] | None) -> str | None:
+    if not response_format:
+        return None
+    fmt_type = response_format.get("type")
+    if fmt_type == "json_object":
+        return "IMPORTANT: respond with a single valid JSON object and nothing else."
+    if fmt_type == "json_schema":
+        schema = response_format.get("json_schema", {})
+        schema_str = json.dumps(schema, ensure_ascii=False) if isinstance(schema, dict) else str(schema)
+        return (
+            "IMPORTANT: respond with a single valid JSON object matching this JSON Schema "
+            f"and nothing else:\n{schema_str}"
+        )
+    return None
+
+
 def translate_openai_request(
     request: OpenAIChatRequest,
     max_transcript_chars: int = 0,
     suppress_system_prompt_with_tools: bool = False,
+    sanitize_system_prompt_with_tools: bool = True,
+    allow_parallel_tool_calls: bool = False,
+    dedup_websearch: bool = True,
 ) -> TranslatedRequest:
     system_lines: list[str] = []
     transcript_lines: list[str] = []
     prompt = ""
+    images: list[ImageInput] = []
+    image_count = sum(count_image_parts(m.content) for m in request.messages)
 
     for index, message in enumerate(request.messages):
         is_last = index == len(request.messages) - 1
@@ -115,6 +218,7 @@ def translate_openai_request(
         if is_last:
             if message.role == "user":
                 prompt = flatten_content(message.content).strip()
+                images = extract_images(message.content)
             elif message.role == "tool":
                 prompt = _render_openai_message(message)
             else:
@@ -128,97 +232,60 @@ def translate_openai_request(
         raise ValueError("A final user or tool message is required.")
 
     additional_context: list[str] = []
+    tools = _dedup_tools(request.tools, dedup_websearch)
+    if request.tools and len(tools) < len(request.tools):
+        dropped_names = [
+            (t.get("function", t).get("name") or "unknown") for t in request.tools if _is_web_search_tool(t)
+        ]
+        additional_context.append(
+            f"Note: the following tools were dropped because Copilot already provides "
+            f"web-grounded answers through Bing: {', '.join(dropped_names)}. Use the "
+            "remaining tools for local actions."
+        )
     system_text = _join_lines(system_lines)
-    # Client system prompts (e.g. OpenCode's) are written for native function
-    # calling and push the browser-channel model into "I cannot access your
-    # files" prose instead of emitting a tool_call. When tools are present we
-    # drop that framing so the tool protocol is the only authoritative system
-    # instruction the model sees.
-    suppress_system = bool(request.tools) and suppress_system_prompt_with_tools
-    if system_text and not suppress_system:
-        additional_context.append(f"System instructions:\n{system_text}")
-    if request.tools:
-        additional_context.append(render_tool_instructions(request.tools))
+    # Client system prompts (e.g. OpenCode's) assert a competing named identity
+    # that trips the substrate guardrail and suppresses tool_calls. Rather than
+    # dropping the whole prompt (which loses AGENTS.md / agent rules / tool
+    # discipline), we neutralize only the identity assertions and keep the rest.
+    # A hard drop remains available via suppress_system_prompt_with_tools.
+    if system_text:
+        if tools and suppress_system_prompt_with_tools:
+            pass
+        elif tools and sanitize_system_prompt_with_tools:
+            sanitized = neutralize_system_identity(system_text)
+            if sanitized:
+                additional_context.append(f"{_SYSTEM_GUIDELINE_FRAMING}\n{sanitized}")
+        else:
+            additional_context.append(f"System instructions:\n{system_text}")
+    # Images carried as data: URIs on the final user turn are uploaded to the
+    # substrate and referenced via message annotations, so they are NOT dropped.
+    # Only warn when there are image parts we cannot upload (e.g. remote URLs).
+    unuploadable = image_count - len(images)
+    if unuploadable > 0:
+        additional_context.append(
+            f"Note: the user attached {unuploadable} image(s) by URL that this "
+            "channel cannot fetch, so those image(s) were omitted. Do not claim to "
+            "have seen them; ask for a text description if you need one."
+        )
+    if tools:
+        additional_context.append(
+            render_tool_instructions(tools, allow_parallel_tool_calls)
+        )
     transcript_lines = _truncate_transcript(transcript_lines, max_transcript_chars)
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    if request.tools:
-        prompt = f"{prompt}{tool_reminder(request.tools)}"
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
+    json_instruction = _json_mode_instruction(request.response_format)
+    if json_instruction:
+        additional_context.append(json_instruction)
+    if tools:
+        prompt = f"{prompt}{tool_reminder(tools, allow_parallel_tool_calls)}"
+    sampling = SamplingParams(temperature=request.temperature, top_p=request.top_p)
+    return TranslatedRequest(
+        prompt=prompt,
+        additional_context=additional_context,
+        images=images,
+        sampling=sampling,
+        tools=tools,
+    )
 
-
-def translate_responses_request(request: "OpenAIResponsesRequest") -> TranslatedRequest:
-    from .models import OpenAIResponsesRequest
-    instructions = request.instructions or ""
-    if isinstance(request.input, str):
-        return TranslatedRequest(
-            prompt=request.input,
-            additional_context=[f"System instructions:\n{instructions}"] if instructions else [],
-        )
-    # input is a list of message dicts
-    system_lines: list[str] = []
-    if instructions:
-        system_lines.append(instructions)
-    transcript_lines: list[str] = []
-    prompt = ""
-    items = request.input
-    for index, item in enumerate(items):
-        role = item.get("role", "") if isinstance(item, dict) else ""
-        content = item.get("content", "") if isinstance(item, dict) else str(item)
-        if isinstance(content, list):
-            content = "".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") in ("text", "input_text"))
-        text = content.strip()
-        if not text:
-            continue
-        is_last = index == len(items) - 1
-        if role in {"system", "developer"}:
-            system_lines.append(text)
-            continue
-        if is_last:
-            if role != "user":
-                raise ValueError("The final Responses input message must be a user message.")
-            prompt = text
-            continue
-        transcript_lines.append(f"{role.capitalize()}: {text}")
-    if not prompt:
-        raise ValueError("No user message found in input.")
-    additional_context: list[str] = []
-    system_text = _join_lines(system_lines)
-    if system_text:
-        additional_context.append(f"System instructions:\n{system_text}")
-    transcript_text = _join_lines(transcript_lines)
-    if transcript_text:
-        additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
-
-
-def translate_anthropic_request(
-    request: AnthropicMessagesRequest,
-) -> TranslatedRequest:
-    system_text = flatten_content(request.system).strip()
-    transcript_lines: list[str] = []
-    prompt = ""
-
-    for index, message in enumerate(request.messages):
-        text = flatten_content(message.content).strip()
-        if not text:
-            continue
-        is_last = index == len(request.messages) - 1
-        if is_last:
-            if message.role != "user":
-                raise ValueError("The final Anthropic message must be a user message.")
-            prompt = text
-            continue
-        transcript_lines.append(f"{message.role.capitalize()}: {text}")
-
-    if not prompt:
-        raise ValueError("A final user message is required.")
-
-    additional_context: list[str] = []
-    if system_text:
-        additional_context.append(f"System instructions:\n{system_text}")
-    transcript_text = _join_lines(transcript_lines)
-    if transcript_text:
-        additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context)

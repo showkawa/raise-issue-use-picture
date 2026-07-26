@@ -37,6 +37,7 @@ class FakeCopilotClient:
     def __init__(self):
         self.calls: list[tuple[str, list[str]]] = []
         self.sessions: list[object | None] = []
+        self.images: list[object] = []
 
     async def chat(self, prompt: str, additional_context: list[str], session: object | None = None) -> str:
         self.calls.append((prompt, additional_context))
@@ -341,6 +342,480 @@ def test_openai_chat_completion_translates_history() -> None:
     assert fake.sessions == [None]
 
 
+def test_neutralize_system_identity_strips_persona_keeps_guidance() -> None:
+    from teams_copilot_proxy.translator import neutralize_system_identity
+
+    text = (
+        "You are OpenCode, the best coding agent on the planet.\n\n"
+        "You must run tests after edits.\n- Never edit vendor/."
+    )
+    out = neutralize_system_identity(text)
+    assert "OpenCode" not in out
+    assert "best coding agent on the planet" not in out
+    assert "You must run tests after edits." in out
+    assert "Never edit vendor/." in out
+
+
+def test_neutralize_system_identity_handles_lowercase_and_inline() -> None:
+    from teams_copilot_proxy.translator import neutralize_system_identity
+
+    text = "You are opencode, an interactive CLI tool that helps users."
+    out = neutralize_system_identity(text)
+    assert out.lower().startswith("an interactive cli tool")
+    assert "opencode" not in out.lower()
+
+
+def test_translate_sanitizes_system_prompt_when_tools_present() -> None:
+    from teams_copilot_proxy.models import OpenAIChatRequest
+    from teams_copilot_proxy.translator import (
+        _SYSTEM_GUIDELINE_FRAMING,
+        translate_openai_request,
+    )
+
+    request = OpenAIChatRequest(
+        model="claude-sonnet",
+        messages=[
+            {"role": "system", "content": "You are OpenCode, the best coding agent on the planet.\nRun tests."},
+            {"role": "user", "content": "Do the thing"},
+        ],
+        tools=[{"type": "function", "function": {"name": "read", "parameters": {}}}],
+    )
+    translated = translate_openai_request(request, 200_000)
+    guideline_blocks = [c for c in translated.additional_context if c.startswith(_SYSTEM_GUIDELINE_FRAMING)]
+    assert len(guideline_blocks) == 1
+    block = guideline_blocks[0]
+    assert "OpenCode" not in block
+    assert "best coding agent on the planet" not in block
+    assert "Run tests." in block
+
+
+def test_translate_can_hard_drop_system_prompt_with_tools() -> None:
+    from teams_copilot_proxy.models import OpenAIChatRequest
+    from teams_copilot_proxy.translator import (
+        _SYSTEM_GUIDELINE_FRAMING,
+        translate_openai_request,
+    )
+
+    request = OpenAIChatRequest(
+        model="claude-sonnet",
+        messages=[
+            {"role": "system", "content": "You are OpenCode. Run tests."},
+            {"role": "user", "content": "Do the thing"},
+        ],
+        tools=[{"type": "function", "function": {"name": "read", "parameters": {}}}],
+    )
+    translated = translate_openai_request(
+        request, 200_000, suppress_system_prompt_with_tools=True
+    )
+    assert not any(c.startswith(_SYSTEM_GUIDELINE_FRAMING) for c in translated.additional_context)
+    assert not any(c.startswith("System instructions:") for c in translated.additional_context)
+
+
+def test_translate_keeps_raw_system_prompt_without_tools() -> None:
+    from teams_copilot_proxy.models import OpenAIChatRequest
+    from teams_copilot_proxy.translator import translate_openai_request
+
+    request = OpenAIChatRequest(
+        model="claude-sonnet",
+        messages=[
+            {"role": "system", "content": "You are OpenCode. Be concise."},
+            {"role": "user", "content": "Hi"},
+        ],
+    )
+    translated = translate_openai_request(request, 200_000)
+    assert any(c == "System instructions:\nYou are OpenCode. Be concise." for c in translated.additional_context)
+
+
+def test_estimate_tokens_monotonic() -> None:
+    from teams_copilot_proxy.usage import estimate_tokens
+
+    assert estimate_tokens("") == 0
+    assert estimate_tokens(None) == 0
+    assert estimate_tokens("a") == 1
+    assert estimate_tokens("a" * 100) > estimate_tokens("a" * 10)
+
+
+def test_chat_completion_includes_usage() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "messages": [{"role": "user", "content": "Hello there"}]},
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_streaming_includes_usage_in_final_chunk() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+    final = None
+    for line in payload.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        event = json.loads(line[len("data: "):])
+        choices = event.get("choices") or [{}]
+        if choices[0].get("finish_reason") == "stop":
+            final = event
+    assert final is not None
+    usage = final["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_tool_call_completion_includes_usage() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] > 0
+    assert usage["completion_tokens"] > 0
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_chat_completion_forwards_data_uri_images_instead_of_dropping() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this screenshot?"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    prompt, context = fake.calls[0]
+    assert prompt == "What is in this screenshot?"
+    # The image is uploaded and referenced, not dropped, so there is no omission note.
+    assert not any("were omitted" in part for part in context)
+    assert len(fake.images) == 1
+    assert fake.images[0].data_uri == "data:image/png;base64,AAAA"
+    assert fake.images[0].file_type == "png"
+
+
+def test_chat_completion_warns_only_for_unfetchable_remote_image_urls() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Look at this"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/pic.png"},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    _, context = fake.calls[0]
+    assert any("were omitted" in part for part in context)
+    assert fake.images == []
+
+
+def _bare_substrate_client() -> SubstrateCopilotClient:
+    """Build a client without running token validation, for offline unit tests."""
+    client = SubstrateCopilotClient.__new__(SubstrateCopilotClient)
+    client._token = "tok"
+    client._oid = "oid-1"
+    client._tid = "tid-1"
+    client._proxy = ""
+    client._time_zone = "Asia/Tokyo"
+    client.tone = "Magic"
+    client.images = []
+    client.options = {}
+    return client
+
+
+def test_encode_multipart_repeats_field_names_and_closes_boundary() -> None:
+    from teams_copilot_proxy.substrate_client import _encode_multipart
+
+    body, boundary = _encode_multipart(
+        [("scenario", "UploadImage"), ("optionsSets", "x"), ("optionsSets", "y")]
+    )
+    text = body.decode("utf-8")
+    assert text.count('name="optionsSets"') == 2
+    assert 'name="scenario"' in text
+    assert text.rstrip().endswith(f"--{boundary}--")
+
+
+def test_chat_invoke_embeds_image_annotations_and_gptv_option() -> None:
+    client = _bare_substrate_client()
+    annotations = [{
+        "id": "0-ea-d7-abc",
+        "messageAnnotationMetadata": {"@type": "File", "fileType": "png"},
+        "messageAnnotationType": "ImageFile",
+    }]
+    frame = client._chat_invoke("hi", "conv", "sess", "req", True, annotations)
+    arg = json.loads(frame.rstrip("\x1e"))["arguments"][0]
+    assert arg["message"]["messageAnnotations"] == annotations
+    assert "gptvnorm2048" in arg["optionsSets"]
+
+
+def test_chat_invoke_without_images_has_no_annotations() -> None:
+    client = _bare_substrate_client()
+    frame = client._chat_invoke("hi", "conv", "sess", "req", True)
+    arg = json.loads(frame.rstrip("\x1e"))["arguments"][0]
+    assert arg["message"]["messageAnnotations"] == []
+    assert "gptvnorm2048" not in arg["optionsSets"]
+
+
+def test_chat_invoke_options_default_empty() -> None:
+    client = _bare_substrate_client()
+    frame = client._chat_invoke("hi", "conv", "sess", "req", True)
+    arg = json.loads(frame.rstrip("\x1e"))["arguments"][0]
+    assert arg["options"] == {}
+
+
+def test_chat_invoke_forwards_sampling_options_when_set() -> None:
+    client = _bare_substrate_client()
+    client.options = {"temperature": 0.0, "topP": 0.1}
+    frame = client._chat_invoke("hi", "conv", "sess", "req", True)
+    arg = json.loads(frame.rstrip("\x1e"))["arguments"][0]
+    assert arg["options"] == {"temperature": 0.0, "topP": 0.1}
+
+
+def test_translate_carries_sampling_params() -> None:
+    from teams_copilot_proxy.models import OpenAIChatRequest
+    from teams_copilot_proxy.translator import translate_openai_request
+
+    request = OpenAIChatRequest(
+        model="claude-sonnet",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.0,
+        top_p=0.5,
+    )
+    translated = translate_openai_request(request, 200_000)
+    assert translated.sampling.as_options() == {"temperature": 0.0, "topP": 0.5}
+
+
+def test_translate_omits_unset_sampling_params() -> None:
+    from teams_copilot_proxy.models import OpenAIChatRequest
+    from teams_copilot_proxy.translator import translate_openai_request
+
+    request = OpenAIChatRequest(
+        model="claude-sonnet",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    translated = translate_openai_request(request, 200_000)
+    assert translated.sampling.as_options() == {}
+
+
+def test_parse_multi_collects_every_tool_call_block() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output_multi
+
+    text = (
+        '```tool_call\n{"name": "read", "arguments": {"path": "a"}}\n```\n'
+        '```tool_call\n{"name": "read", "arguments": {"path": "b"}}\n```'
+    )
+    outcome = parse_model_output_multi(text, {"read"})
+    assert outcome.error is None
+    assert [tc.name for tc in outcome.tool_calls] == ["read", "read"]
+    assert [tc.arguments["path"] for tc in outcome.tool_calls] == ["a", "b"]
+
+
+def test_parse_multi_falls_back_to_single_block() -> None:
+    from teams_copilot_proxy.tool_protocol import (
+        parse_model_output,
+        parse_model_output_multi,
+    )
+
+    text = '```tool_call\n{"name": "read", "arguments": {}}\n```'
+    multi = parse_model_output_multi(text, {"read"})
+    single = parse_model_output(text, {"read"})
+    assert len(multi.tool_calls) == 1
+    assert multi.tool_call.name == single.tool_call.name
+
+
+def test_parse_multi_rejects_unknown_tool_in_any_block() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output_multi
+
+    text = (
+        '```tool_call\n{"name": "read", "arguments": {}}\n```\n'
+        '```tool_call\n{"name": "nope", "arguments": {}}\n```'
+    )
+    outcome = parse_model_output_multi(text, {"read"})
+    assert outcome.error is not None
+    assert not outcome.tool_calls
+
+
+def test_parallel_header_permits_multiple_tools() -> None:
+    from teams_copilot_proxy.tool_protocol import render_tool_instructions
+
+    tools = [{"type": "function", "function": {"name": "read", "parameters": {}}}]
+    single = render_tool_instructions(tools, allow_parallel=False)
+    parallel = render_tool_instructions(tools, allow_parallel=True)
+    assert "at most ONE tool per reply" in single
+    assert "at most ONE tool per reply" not in parallel
+    assert "several independent tools at once" in parallel
+
+
+def test_tool_outcome_completion_emits_all_tool_calls() -> None:
+    from teams_copilot_proxy.app import _tool_outcome_completion
+    from teams_copilot_proxy.tool_protocol import ParsedToolCall, ToolParseOutcome
+
+    outcome = ToolParseOutcome(
+        text="",
+        tool_calls=[
+            ParsedToolCall(name="read", arguments={"path": "a"}),
+            ParsedToolCall(name="grep", arguments={"q": "x"}),
+        ],
+    )
+    body = _tool_outcome_completion("m365-copilot", outcome)
+    calls = body["choices"][0]["message"]["tool_calls"]
+    assert [c["function"]["name"] for c in calls] == ["read", "grep"]
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_parse_recovers_tool_call_from_mislabelled_json_fence() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    text = (
+        "Let me think. I need to inspect the entry point first.\n\n"
+        '```json\n{"name": "read", "arguments": {"path": "main.py"}}\n```'
+    )
+    outcome = parse_model_output(text, {"read"})
+    assert outcome.error is None
+    assert outcome.tool_call is not None
+    assert outcome.tool_call.name == "read"
+    assert outcome.tool_call.arguments == {"path": "main.py"}
+
+
+def test_fenced_json_fallback_ignores_unknown_tool_names() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    # A JSON sample that is not one of the tools must stay plain text.
+    text = 'Here is an example config:\n```json\n{"name": "not_a_tool", "arguments": {}}\n```'
+    outcome = parse_model_output(text, {"read"})
+    assert outcome.tool_call is None
+    assert outcome.error is None
+
+
+def test_fenced_json_fallback_skipped_when_ambiguous() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    # Two candidate blocks -> ambiguous, so no tool call is recovered.
+    text = (
+        '```json\n{"name": "read", "arguments": {"path": "a"}}\n```\n'
+        '```json\n{"name": "read", "arguments": {"path": "b"}}\n```'
+    )
+    outcome = parse_model_output(text, {"read"})
+    assert outcome.tool_call is None
+
+
+def test_confabulation_detects_sandbox_and_mount_hallucination() -> None:
+    from teams_copilot_proxy.guards import detect_confabulation
+
+    sandbox_reply = (
+        "I can't access the repository from this execution environment. The available "
+        "workspace is /mnt/data, which is empty. Please attach or mount the repository "
+        "files into the available workspace."
+    )
+    assert detect_confabulation(sandbox_reply)
+    # A reasoning tone that refuses by claiming the file is not reachable.
+    not_accessible = (
+        "I can summarize it once `app.py` is available, but no `app.py` file is "
+        "currently accessible in the project workspace."
+    )
+    assert detect_confabulation(not_accessible)
+    # Real Gpt_5_6_Reasoning refusals captured live during tuning.
+    live_refusals = [
+        "I couldn't locate a repository or project files in the accessible workspace, "
+        "so I can't inspect the layout. Please make the repository available through "
+        "the project tools, then rerun this initialization request.",
+        "I couldn't locate the project repository or its main entry point in the "
+        "accessible workspace. Please provide the repository through the project tooling.",
+        "I checked the available project directory, but it contains no repository "
+        "files, so there is no main entry point to inspect or explain.",
+    ]
+    for reply in live_refusals:
+        assert detect_confabulation(reply), reply
+    # A normal reply that merely mentions files must not trip the guard.
+    assert not detect_confabulation("I will attach the generated report to the PR.")
+    assert not detect_confabulation("The program prints 'hello' and then exits.")
+    assert not detect_confabulation("I read main.py; it defines a CLI entry point.")
+
+
+def test_tool_protocol_header_forbids_server_sandbox() -> None:
+    from teams_copilot_proxy.tool_protocol import render_tool_instructions
+
+    tools = [{"type": "function", "function": {"name": "read", "parameters": {}}}]
+    for header in (
+        render_tool_instructions(tools, allow_parallel=False),
+        render_tool_instructions(tools, allow_parallel=True),
+    ):
+        assert "/mnt/data" in header
+        assert "no separate" in header
+
+
+def test_upload_images_chains_conversation_and_builds_annotations() -> None:
+    from teams_copilot_proxy.models import ImageInput
+
+    client = _bare_substrate_client()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_upload(conv_id: str, image: ImageInput) -> tuple[str, str]:
+        calls.append((conv_id, image.filename))
+        return f"doc-{len(calls)}", "server-conv"
+
+    client._upload_image = fake_upload  # type: ignore[method-assign]
+    images = [
+        ImageInput(data_uri="data:image/png;base64,AAAA", filename="a.png", file_type="png"),
+        ImageInput(data_uri="data:image/jpeg;base64,BBBB", filename="b.jpg", file_type="jpeg"),
+    ]
+    conv, annotations = asyncio.run(client._upload_images("start", images))
+    assert conv == "server-conv"
+    assert calls[0][0] == "start"
+    assert calls[1][0] == "server-conv"  # second upload reuses the assigned conversation
+    assert [a["id"] for a in annotations] == ["doc-1", "doc-2"]
+    assert annotations[1]["messageAnnotationMetadata"]["fileType"] == "jpeg"
+
+
 def test_openai_persistent_session_header_reuses_session() -> None:
     fake = FakeCopilotClient()
     client = build_client(fake)
@@ -501,61 +976,6 @@ def test_openai_streaming_returns_error_event_on_upstream_failure() -> None:
     assert '"type": "upstream_error"' in payload
     assert '"message": "upstream broke"' in payload
     assert "data: [DONE]" in payload
-
-
-def test_responses_streaming_returns_error_event_on_upstream_failure() -> None:
-    client = build_client(FailingStreamCopilotClient())
-    with client.stream(
-        "POST",
-        "/v1/responses",
-        json={"model": "ignored", "stream": True, "input": "Hello"},
-    ) as response:
-        payload = "".join(
-            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
-            for chunk in response.iter_text()
-        )
-
-    assert response.status_code == 200
-    assert '"type": "error"' in payload
-    assert '"message": "upstream broke"' in payload
-
-
-def test_anthropic_messages_endpoint() -> None:
-    fake = FakeCopilotClient()
-    client = build_client(fake)
-    response = client.post(
-        "/v1/messages",
-        json={
-            "model": "ignored",
-            "system": "Be concise.",
-            "messages": [{"role": "user", "content": "Hello"}],
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["type"] == "message"
-    assert body["content"][0]["text"] == "copilot reply"
-
-
-def test_anthropic_streaming_returns_error_event_on_upstream_failure() -> None:
-    client = build_client(FailingStreamCopilotClient())
-    with client.stream(
-        "POST",
-        "/v1/messages",
-        json={
-            "model": "ignored",
-            "stream": True,
-            "messages": [{"role": "user", "content": "Hello"}],
-        },
-    ) as response:
-        payload = "".join(
-            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
-            for chunk in response.iter_text()
-        )
-
-    assert response.status_code == 200
-    assert "event: error" in payload
-    assert '"message": "upstream broke"' in payload
 
 
 SAMPLE_TOOLS = [
@@ -1317,13 +1737,13 @@ def test_tool_reminder_is_appended_after_prompt_when_tools_present() -> None:
         json={
             "model": "ignored",
             "tools": SAMPLE_TOOLS,
-            "messages": [{"role": "user", "content": "看下当前项目下的README.md"}],
+            "messages": [{"role": "user", "content": "çœ‹ä¸‹å½“å‰é¡¹ç›®ä¸‹çš„README.md"}],
         },
     )
 
     assert response.status_code == 200
     prompt = fake.calls[0][0]
-    assert prompt.startswith("看下当前项目下的README.md")
+    assert prompt.startswith("çœ‹ä¸‹å½“å‰é¡¹ç›®ä¸‹çš„README.md")
     assert "tool-calling reminder" in prompt
     assert "read_file" in prompt
     assert prompt.rstrip().endswith(
@@ -1331,7 +1751,9 @@ def test_tool_reminder_is_appended_after_prompt_when_tools_present() -> None:
     )
 
 
-def test_system_prompt_is_suppressed_when_tools_present() -> None:
+def test_system_prompt_is_sanitized_when_tools_present() -> None:
+    from teams_copilot_proxy.translator import _SYSTEM_GUIDELINE_FRAMING
+
     fake = ToolCallingCopilotClient(
         ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
     )
@@ -1342,16 +1764,25 @@ def test_system_prompt_is_suppressed_when_tools_present() -> None:
             "model": "ignored",
             "tools": SAMPLE_TOOLS,
             "messages": [
-                {"role": "system", "content": "You are opencode. You cannot access files."},
-                {"role": "user", "content": "看下当前项目下的README.md"},
+                {
+                    "role": "system",
+                    "content": "You are opencode, the best coding agent on the planet.\nAlways run tests after edits.",
+                },
+                {"role": "user", "content": "çœ‹ä¸‹å½“å‰é¡¹ç›®ä¸‹çš„README.md"},
             ],
         },
     )
 
     assert response.status_code == 200
     context = fake.calls[0][1]
+    # No raw "System instructions:" block, and the competing identity is stripped,
+    # but the engineering guidance is preserved under the neutral guideline framing.
     assert not any(part.startswith("System instructions:") for part in context)
-    assert not any("cannot access files" in part for part in context)
+    guideline_blocks = [p for p in context if p.startswith(_SYSTEM_GUIDELINE_FRAMING)]
+    assert len(guideline_blocks) == 1
+    assert "opencode" not in guideline_blocks[0].lower()
+    assert "best coding agent on the planet" not in guideline_blocks[0]
+    assert "Always run tests after edits." in guideline_blocks[0]
     assert any("Tool calling protocol" in part for part in context)
 
 
@@ -1374,13 +1805,14 @@ def test_system_prompt_kept_when_no_tools() -> None:
     assert any(part.startswith("System instructions:") for part in context)
 
 
-def test_system_prompt_kept_with_tools_when_suppression_disabled() -> None:
+def test_system_prompt_kept_raw_with_tools_when_sanitize_and_suppress_disabled() -> None:
     fake = ToolCallingCopilotClient(
         ['```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```']
     )
     settings = Settings(
         M365_ACCESS_TOKEN="fake-token",
         M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS=False,
+        M365_SANITIZE_SYSTEM_PROMPT_WITH_TOOLS=False,
     )
     app = create_app(settings=settings, copilot_client_factory=lambda: fake)
     client = TestClient(app)
@@ -1398,7 +1830,7 @@ def test_system_prompt_kept_with_tools_when_suppression_disabled() -> None:
 
     assert response.status_code == 200
     context = fake.calls[0][1]
-    assert any(part.startswith("System instructions:") for part in context)
+    assert any(part == "System instructions:\nYou are opencode." for part in context)
 
 
 def test_code_interpreter_option_sets_are_disabled() -> None:
@@ -1563,20 +1995,3 @@ def test_example_opencode_config_parses_and_declares_tool_call() -> None:
     assert model["tool_call"] is True
     options = config["provider"]["teams-copilot"]["options"]
     assert options["baseURL"] == "http://127.0.0.1:8000/v1"
-
-
-def test_responses_requires_final_user_message() -> None:
-    client = build_client(FakeCopilotClient())
-    response = client.post(
-        "/v1/responses",
-        json={
-            "model": "ignored",
-            "input": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi"},
-            ],
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "The final Responses input message must be a user message."
