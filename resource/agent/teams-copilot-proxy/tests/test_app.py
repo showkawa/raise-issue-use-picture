@@ -2022,6 +2022,41 @@ def test_extended_tone_catalog_routes_by_model_id() -> None:
     assert _tone_for_model("claude-sonnet-reasoning", "Claude_Sonnet") == "Claude_Sonnet_Reasoning"
 
 
+def test_dotted_model_ids_route_like_the_gateway_catalog() -> None:
+    assert _tone_for_model("gpt-5.5", "Claude_Sonnet") == "Gpt_5_5_Chat"
+    assert _tone_for_model("gpt-5.5-reasoning", "Claude_Sonnet") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("gpt-5.6-reasoning", "Claude_Sonnet") == "Gpt_5_6_Reasoning"
+    assert _tone_for_model("gpt-5.2", "Claude_Sonnet") == "Gpt_5_2_Chat"
+    assert _tone_for_model("gpt-5.4-reasoning", "Claude_Sonnet") == "Gpt_5_4_Reasoning"
+    assert _tone_for_model("claude-sonnet-reasoning", "Claude_Sonnet") == "Claude_Sonnet_Reasoning"
+
+
+def test_bare_model_aliases_route_to_chat_or_reasoning_sibling() -> None:
+    assert _tone_for_model("gpt-5-5", "Claude_Sonnet") == "Gpt_5_5_Chat"
+    assert _tone_for_model("gpt-5-2", "Claude_Sonnet") == "Gpt_5_2_Chat"
+    assert _tone_for_model("gpt-5-4", "Claude_Sonnet") == "Gpt_5_4_Chat"
+    assert _tone_for_model("gpt-5-6", "Claude_Sonnet") == "Gpt_5_6_Reasoning"
+    assert _tone_for_model("claude", "Claude_Sonnet") == "Claude_Sonnet"
+    assert _tone_for_model("quick", "Claude_Sonnet") == "Gpt_Quick"
+    assert _tone_for_model("think-deeper", "Claude_Sonnet") == "Gpt_Reasoning"
+    # Effort still upgrades a bare chat alias to its reasoning sibling.
+    assert _tone_for_model("gpt-5.5", "Claude_Sonnet", "high") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("claude", "Claude_Sonnet", "xhigh") == "Claude_Sonnet_Reasoning"
+
+
+def test_models_endpoint_lists_full_routable_catalog() -> None:
+    client = build_client(FakeCopilotClient())
+    ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
+    for expected in (
+        "gpt-5-5-chat",
+        "gpt-5-5-reasoning",
+        "gpt-5-6-reasoning",
+        "claude-sonnet",
+        "claude-sonnet-reasoning",
+    ):
+        assert expected in ids
+
+
 def test_schema_validation_rejects_missing_required_then_retries() -> None:
     fake = ToolCallingCopilotClient([
         '```tool_call\n{"name": "read_file", "arguments": {}}\n```',

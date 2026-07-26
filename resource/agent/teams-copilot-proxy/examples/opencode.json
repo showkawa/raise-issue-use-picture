@@ -21,6 +21,16 @@
             "output": 8192
           }
         },
+        "claude-sonnet-reasoning": {
+          "name": "Copilot (Claude Sonnet Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 265000,
+            "output": 8192
+          }
+        },
         "gpt-5-5-chat": {
           "name": "Copilot (GPT-5.5 Chat)",
           "tool_call": true,

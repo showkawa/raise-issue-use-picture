@@ -36,7 +36,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Supports persistent Copilot sessions across turns
 - Emulated tool calling on `/v1/chat/completions`, so OpenCode can read files, run commands, and edit code
 - Image/vision input: OpenCode image attachments are uploaded to the substrate and described by the model (GPT-5 / reasoning tones)
-- Maps OpenAI model ids to Copilot tones: an exact tone id (e.g. `gpt-5-6-reasoning`, `gpt-5-5-chat`, `claude-sonnet`) routes to that tone; otherwise the `claude*`/`gpt*`/`magic*` prefix picks `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses the default tone
+- Maps OpenAI model ids to Copilot tones: an exact tone id (e.g. `gpt-5-6-reasoning`, `gpt-5-5-chat`, `claude-sonnet`, `claude-sonnet-reasoning`) routes to that tone; dotted ids (`gpt-5.5`, `gpt-5.6-reasoning`) and bare aliases (`gpt-5-5`, `claude`, `quick`, `think-deeper`) are normalized to the same catalog; otherwise the `claude*`/`gpt*`/`magic*` prefix picks `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses the default tone
 - Startup capability probe: tests candidate tones and a fenced tool probe, tiers the deployment T1 (Claude + reliable tools) or T3 (best-effort tools), cached for 24h and reported on `/healthz`
 - Guard layer for tool turns: detects confabulation ("I can't access your files"), hallucinated completion, safety-filter disengagement, and upstream throttling; shares a per-request retry budget and reports honestly via an `x_m365_guard` field instead of faking tool success
 - Streaming with tools: immediate HTTP 200, `: keepalive` comments while Copilot thinks, then typewriter-style chunked delivery of plain-text answers (tool calls stay atomic)
@@ -78,7 +78,21 @@ Proxy connection settings:
 | Base URL | `http://127.0.0.1:8000/v1` |
 | API Key | `unused` |
 
-The model id selects the Copilot tone: an exact tone id (e.g. `claude-sonnet`, `gpt-5-5-chat`, `gpt-5-5-reasoning`, `gpt-5-6-reasoning`) routes to that tone; otherwise ids starting with `claude`/`gpt`/`magic` map to `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses `M365_DEFAULT_TONE` (or the tone chosen by the startup probe).
+The model id selects the Copilot tone. The full routable catalog (also advertised by `GET /v1/models`):
+
+| Model id (canonical) | Also accepted as | Copilot tone | Tools | Vision |
+|---|---|---|---|---|
+| `gpt-5-5-chat` | `gpt-5.5`, `gpt-5-5` | `Gpt_5_5_Chat` | yes | yes |
+| `gpt-5-5-reasoning` | `gpt-5.5-reasoning` | `Gpt_5_5_Reasoning` | yes | yes |
+| `gpt-5-6-reasoning` | `gpt-5.6-reasoning`, `gpt-5-6` | `Gpt_5_6_Reasoning` | yes | yes |
+| `claude-sonnet` | `claude` | `Claude_Sonnet` | yes | no |
+| `claude-sonnet-reasoning` | — | `Claude_Sonnet_Reasoning` | yes | no |
+| `gpt-5-2-chat` / `gpt-5-2-reasoning` | `gpt-5.2` / `gpt-5.2-reasoning` | `Gpt_5_2_*` | yes | yes |
+| `gpt-5-3-chat` | `gpt-5.3` | `Gpt_5_3_Chat` | yes | yes |
+| `gpt-5-4-chat` / `gpt-5-4-reasoning` | `gpt-5.4` / `gpt-5.4-reasoning` | `Gpt_5_4_*` | yes | yes |
+| `gpt-quick` / `gpt-reasoning` | `quick` / `think-deeper` | `Gpt_Quick` / `Gpt_Reasoning` | yes | yes |
+
+Dots are normalized to hyphens, a bare GPT id routes to its chat sibling (`gpt-5-6` has no chat sibling and routes to the reasoning tone), and every model accepts the `reasoning_effort` request field or a `-none`/`-minimal`/`-low`/`-medium`/`-high`/`-xhigh` id suffix — `medium`/`high`/`xhigh` upgrade a chat tone to its reasoning sibling, while explicit `*-reasoning` ids are never downgraded. Ids not in the catalog fall back to the `claude`/`gpt`/`magic` prefix rules, then to `M365_DEFAULT_TONE` (or the tone chosen by the startup probe). Whether a given tone actually works depends on your tenant; the startup probe tests the main ones and `/healthz` reports the result.
 
 Recommended: drop a project-level `opencode.json` in your repo root. It declares the proxy as a custom provider with `tool_call: true`, which is **required** â€” without it OpenCode will not send tool definitions and the agent loop cannot run:
 

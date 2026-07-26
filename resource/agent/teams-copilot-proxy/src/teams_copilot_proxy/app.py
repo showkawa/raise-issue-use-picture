@@ -148,10 +148,26 @@ def _split_effort_suffix(name: str) -> tuple[str, str | None]:
     return name, None
 
 
+# Friendly aliases accepted in addition to the canonical hyphenated tone ids
+# (dots are normalized to hyphens first, so `gpt-5.5` also lands here). Bare
+# GPT ids without a -chat/-reasoning suffix route to the chat sibling, matching
+# the model catalog of other ChatHub gateways.
+_MODEL_ALIASES = {
+    "claude": "Claude_Sonnet",
+    "quick": "Gpt_Quick",
+    "think-deeper": "Gpt_Reasoning",
+    "gpt-5-2": "Gpt_5_2_Chat",
+    "gpt-5-3": "Gpt_5_3_Chat",
+    "gpt-5-4": "Gpt_5_4_Chat",
+    "gpt-5-5": "Gpt_5_5_Chat",
+    "gpt-5-6": "Gpt_5_6_Reasoning",
+}
+
+
 def _tone_for_model(
     model: str, default_tone: str, reasoning_effort: str | None = None
 ) -> str:
-    name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower()
+    name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower().replace(".", "-")
     base, suffix_effort = _split_effort_suffix(name)
     effort = (reasoning_effort or "").strip().lower() or suffix_effort or ""
     tone = None
@@ -159,6 +175,8 @@ def _tone_for_model(
         if _model_id_for_tone(known) == base:
             tone = known
             break
+    if tone is None:
+        tone = _MODEL_ALIASES.get(base)
     if tone is None:
         for prefix, prefix_tone in _TONE_BY_MODEL_PREFIX:
             if base.startswith(prefix):
@@ -289,6 +307,13 @@ def create_app(
                 model_id = _model_id_for_tone(tone)
                 if model_id not in ids:
                     ids.append(model_id)
+        # Advertise the full routable tone catalog, not only the probed subset:
+        # the substrate accepts these tones even when the startup probe skipped
+        # them, and a request simply fails upstream if the tenant lacks one.
+        for tone in KNOWN_TONES:
+            model_id = _model_id_for_tone(tone)
+            if model_id not in ids:
+                ids.append(model_id)
         return {
             "object": "list",
             "data": [
