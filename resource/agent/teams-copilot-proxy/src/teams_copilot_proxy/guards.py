@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 CONFABULATION = "confabulation"
+HOSTED_FILE_LINK = "hosted_file_link"
 HALLUCINATED_COMPLETION = "hallucinated_completion"
 DISENGAGED = "disengaged"
 TOOL_PARSE_FAILURE = "tool_parse_failure"
@@ -23,8 +24,6 @@ _CONFAB_RES = [
         r"\bplease (?:attach|mount|provide|upload) (?:or \w+ )?(?:the |your )?(?:repositor(?:y|ies)|repo|files?|workspace|project|codebase)\b",
         r"\b(?:attach|mount)(?:ed|ing)? (?:or \w+ )?(?:the |your )?(?:repositor(?:y|ies)|repo|workspace|codebase)\b",
         r"/mnt\b",
-        r"https?://[^\s)]*asyncgw\.teams\.microsoft\.com[^\s)]*",
-        r"/v1/objects/",
         r"\bnot (?:inside )?a git repository\b",
         r"\b(?:not available|unavailable) in this (?:chat|session|conversation|environment)\b",
         r"\bcan.?t (?:directly )?use the (?:external|client.side|provided)\b[^.]{0,40}\btools?\b",
@@ -43,6 +42,16 @@ _CONFAB_RES = [
         r"\bno main entry point\b",
         r"(?:æ— æ³•|ä¸èƒ½|æ²¡åŠžæ³•)(?:ç›´æŽ¥)?(?:è®¿é—®|è¯»å–|æ‰“å¼€|æŸ¥çœ‹|æµè§ˆ)(?:ä½ çš„|æ‚¨çš„|æœ¬åœ°|è¯¥)?(?:æ–‡ä»¶|æ–‡ä»¶ç³»ç»Ÿ|ç›®å½•|æ–‡ä»¶å¤¹|ä»£ç åº“|ä»“åº“|ç”µè„‘|æœºå™¨)",
         r"\u8bf7(?:\u628a|\u5c06)?(?:\u6587\u4ef6|\u4ee3\u7801|\u5185\u5bb9)(?:\u7c98\u8d34|\u8d34|\u53d1\u7ed9\u6211|\u63d0\u4f9b|\u4e0a\u4f20)",
+    )
+]
+
+# Copilot sometimes materializes a file server-side and answers with a hosted
+# download link instead of emitting the client-side write tool call.
+_HOSTED_LINK_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"https?://[^\s)]*asyncgw\.teams\.microsoft\.com[^\s)]*",
+        r"/v1/objects/",
     )
 ]
 
@@ -65,11 +74,25 @@ def detect_confabulation(text: str) -> bool:
     return any(pattern.search(text) for pattern in _CONFAB_RES)
 
 
+def detect_hosted_file_link(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _HOSTED_LINK_RES)
+
+
 def detect_hallucinated_completion(text: str) -> bool:
     return any(pattern.search(text) for pattern in _HALLUCINATED_RES)
 
 
 def guard_retry_prompt(guard: str) -> str:
+    if guard == HOSTED_FILE_LINK:
+        return (
+            "You produced a hosted/server-side file link instead of writing the file "
+            "on the user's machine. Hosted links are useless here: the client only "
+            "accepts files written through its tools. Do NOT generate or reference "
+            "any uploaded/hosted file or download link. To create or modify a file "
+            "you MUST reply with ONLY one fenced tool_call block invoking the "
+            "appropriate tool (e.g. write/edit) with the full file content in its "
+            "arguments."
+        )
     if guard == CONFABULATION:
         return (
             "You have no sandbox, no /mnt/data, and no execution environment of your own, "

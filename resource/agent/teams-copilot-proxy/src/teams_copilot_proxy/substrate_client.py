@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -108,6 +109,7 @@ class SubstrateCopilotClient:
         time_zone: str = "Asia/Tokyo",
         proxy: str = "",
         tone: str = "Claude_Sonnet",
+        throttle_retries: int = 2,
     ):
         if not access_token:
             raise SubstrateCopilotError(
@@ -118,6 +120,7 @@ class SubstrateCopilotClient:
         self._time_zone = time_zone
         self._proxy = proxy
         self.tone = tone
+        self._throttle_retries = max(0, throttle_retries)
         # Set per-request by the app layer; consumed and referenced via message
         # annotations when the turn carries image attachments.
         self.images: list[ImageInput] = []
@@ -404,10 +407,22 @@ class SubstrateCopilotClient:
         additional_context: list[str],
         session: PersistentSession | None = None,
     ) -> str:
-        chunks: list[str] = []
-        async for chunk in self.chat_stream(prompt, additional_context, session):
-            chunks.append(chunk)
-        return "".join(chunks)
+        # HTTP 429 backoff: safe to retry the whole turn only while nothing has
+        # been received yet; a partially consumed stream is surfaced as-is.
+        throttles = 0
+        while True:
+            chunks: list[str] = []
+            try:
+                async for chunk in self.chat_stream(
+                    prompt, additional_context, session
+                ):
+                    chunks.append(chunk)
+                return "".join(chunks)
+            except SubstrateThrottledError as exc:
+                if chunks or throttles >= self._throttle_retries:
+                    raise
+                throttles += 1
+                await asyncio.sleep(min(exc.retry_after, 20) * throttles)
 
 
 def _encode_multipart(fields: list[tuple[str, str]]) -> tuple[bytes, str]:

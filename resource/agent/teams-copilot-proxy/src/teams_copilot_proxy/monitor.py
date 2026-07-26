@@ -742,13 +742,15 @@ class SQLiteSink:
         finally:
             conn.close()
 
-    def tool_efficiency(self) -> list[dict]:
+    def tool_efficiency(self, since: float | None = None) -> list[dict]:
         """Per-planning-mode tool-call reliability & cost, grouped by
         ``planning_mode`` over tool-bearing requests only. This is the baseline a
         later router mode can be A/B'd against: tool-call yield, correction /
         guard / error rates, round-trips and latency (p50/p95), plus how often
-        the ledger/shell/dedup mechanisms fired.
+        the ledger/shell/dedup mechanisms fired. ``since`` (unix seconds)
+        restricts the window, e.g. to exclude stale synthetic traffic from an A/B.
         """
+        cutoff = since if since is not None else 0.0
         conn = self._readonly_conn()
         try:
             rows = conn.execute(
@@ -776,10 +778,11 @@ class SQLiteSink:
                     SELECT request_id, COUNT(*) AS calls
                     FROM tool_calls GROUP BY request_id
                 ) tc ON tc.request_id = r.id
-                WHERE r.had_tools = 1
+                WHERE r.had_tools = 1 AND r.ts >= ?
                 GROUP BY COALESCE(r.planning_mode, 'single')
                 ORDER BY requests DESC
-                """
+                """,
+                (cutoff,),
             ).fetchall()
             out = []
             for row in rows:
@@ -790,10 +793,10 @@ class SQLiteSink:
                     d[0]
                     for d in conn.execute(
                         "SELECT duration_ms FROM requests "
-                        "WHERE had_tools = 1 "
+                        "WHERE had_tools = 1 AND ts >= ? "
                         "AND COALESCE(planning_mode, 'single') = ? "
                         "AND duration_ms IS NOT NULL ORDER BY duration_ms",
-                        (mode,),
+                        (cutoff, mode),
                     ).fetchall()
                 ]
                 data["tool_call_yield"] = (

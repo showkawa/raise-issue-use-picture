@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     probe_ttl_seconds: float = Field(default=86_400, alias="M365_PROBE_TTL_SECONDS")
     max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
     proxy: str = Field(default="", alias="M365_PROXY")
+    # 上游 429 限流时在返回错误前重试的次数（按 Retry-After 指数退避，封顶 20s/次）。
+    throttle_retries: int = Field(default=2, alias="M365_THROTTLE_RETRIES")
     tool_correction_retries: int = Field(default=1, alias="M365_TOOL_CORRECTION_RETRIES")
     # Tool-turn planning strategy (baseline for the Monitor A/B, see README):
     #   "single" (default) — one model turn decides the tool call and/or the answer.

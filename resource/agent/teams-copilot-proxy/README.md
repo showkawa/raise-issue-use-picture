@@ -305,7 +305,7 @@ Example:
 | `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=`) |
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
 | `GET /monitor/api/tools` | Tool-call ranking with closure status and error rate |
-| `GET /monitor/api/tool-efficiency` | Tool-planning reliability & cost grouped by `planning_mode` (`single` vs opt-in `router`) |
+| `GET /monitor/api/tool-efficiency` | Tool-planning reliability & cost grouped by `planning_mode` (`single` vs opt-in `router`); `?since=<unix seconds>` restricts the window (e.g. to exclude stale traffic from an A/B) |
 | `GET /monitor/api/errors` | Guard and substrate error timeline (newest first) |
 | `GET /monitor/api/sessions/{key}` | Per-session totals plus request/tool/event streams |
 
@@ -362,6 +362,7 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_MONITOR_RETENTION_DAYS` | `30` | Optional. Monitor rows older than this are deleted automatically. |
 | `M365_MONITOR_TOKEN` | unset | Optional. Separate Bearer token for `/monitor/api/*`; falls back to `M365_ACCESS_TOKEN` when empty. |
 | `M365_MONITOR_LOOPBACK_OPEN` | `true` | Optional. Loopback (127.0.0.1/::1) clients may use `/monitor` and `/monitor/api/*` without a Bearer token. Set `false` to require the token even locally. |
+| `M365_THROTTLE_RETRIES` | `2` | Optional. How many times an upstream HTTP 429 is retried (exponential backoff honoring `Retry-After`, capped at 20 s per wait) before the 429 is surfaced to the client. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 | `M365_OAUTH_CLIENT_ID` | Office web Copilot client | Optional. Public client used for the PKCE `login`/`login-device` flow (ADR-0008). |
 | `M365_OAUTH_AUTHORITY` | `https://login.microsoftonline.com/common` | Optional. OAuth authority (multi-tenant by default). |

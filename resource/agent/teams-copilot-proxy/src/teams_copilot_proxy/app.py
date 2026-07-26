@@ -23,9 +23,11 @@ from .guards import (
     DISENGAGED,
     DISENGAGED_SENTINEL,
     HALLUCINATED_COMPLETION,
+    HOSTED_FILE_LINK,
     TOOL_PARSE_FAILURE,
     detect_confabulation,
     detect_hallucinated_completion,
+    detect_hosted_file_link,
     disengaged_retry_prompt,
     guard_retry_prompt,
 )
@@ -214,6 +216,7 @@ def create_app(
             resolved_settings.time_zone,
             resolved_settings.proxy,
             resolved_settings.default_tone,
+            throttle_retries=resolved_settings.throttle_retries,
         )
     )
     app.state.capability = None
@@ -544,10 +547,12 @@ def create_app(
         return {"tools": monitor.sink.tools()}
 
     @app.get("/monitor/api/tool-efficiency")
-    async def monitor_tool_efficiency(raw_request: Request) -> dict:
+    async def monitor_tool_efficiency(
+        raw_request: Request, since: float | None = None
+    ) -> dict:
         monitor = require_monitor(raw_request)
         monitor.flush()
-        return {"modes": monitor.sink.tool_efficiency()}
+        return {"modes": monitor.sink.tool_efficiency(since)}
 
     @app.get("/monitor/api/errors")
     async def monitor_errors(raw_request: Request, limit: int = 100) -> dict:
@@ -828,7 +833,9 @@ async def _chat_resolving_tools(
         if outcome.error is None:
             if outcome.tool_call is None and outcome.text:
                 triggered = None
-                if detect_confabulation(outcome.text):
+                if detect_hosted_file_link(outcome.text):
+                    triggered = HOSTED_FILE_LINK
+                elif detect_confabulation(outcome.text):
                     triggered = CONFABULATION
                 elif not tools_have_run and detect_hallucinated_completion(outcome.text):
                     triggered = HALLUCINATED_COMPLETION

@@ -190,7 +190,14 @@ def test_default_client_factory_reloads_token_from_env(tmp_path, monkeypatch) ->
     seen_tokens: list[str] = []
 
     class RecordingCopilotClient(FakeCopilotClient):
-        def __init__(self, access_token: str, _time_zone: str, _proxy: str = "", _tone: str = "Claude_Sonnet"):
+        def __init__(
+            self,
+            access_token: str,
+            _time_zone: str,
+            _proxy: str = "",
+            _tone: str = "Claude_Sonnet",
+            throttle_retries: int = 2,
+        ):
             super().__init__()
             seen_tokens.append(access_token)
 
@@ -1284,6 +1291,58 @@ def test_hallucinated_completion_guard_retries_then_tool_call() -> None:
     assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
     assert len(fake.calls) == 2
     assert "did not emit any tool call" in fake.calls[1][0]
+
+
+def test_hosted_file_link_guard_retries_with_targeted_prompt() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            (
+                "Created [`AGENTS.md`](https://jp-prod.asyncgw.teams.microsoft.com"
+                "/v1/objects/0-ea-d2-abc/views/original/AGENTS.md) covering the CI commands."
+            ),
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Create AGENTS.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(fake.calls) == 2
+    assert "hosted/server-side file link" in fake.calls[1][0]
+
+
+def test_substrate_client_retries_throttled_turn_before_first_chunk() -> None:
+    token = make_jwt(int(time.time()) + 3600)
+    substrate = SubstrateCopilotClient(token, throttle_retries=2)
+    attempts = {"n": 0}
+
+    async def fake_stream(prompt, additional_context, session=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise SubstrateThrottledError("throttled", retry_after=0)
+        yield "recovered"
+
+    substrate.chat_stream = fake_stream
+    assert asyncio.run(substrate.chat("hi", [])) == "recovered"
+    assert attempts["n"] == 3
+
+    attempts["n"] = 0
+    strict = SubstrateCopilotClient(token, throttle_retries=0)
+    strict.chat_stream = fake_stream
+    try:
+        asyncio.run(strict.chat("hi", []))
+    except SubstrateThrottledError:
+        pass
+    else:
+        raise AssertionError("throttle_retries=0 must surface the 429")
 
 
 def test_guards_share_retry_budget_and_report_honestly() -> None:
