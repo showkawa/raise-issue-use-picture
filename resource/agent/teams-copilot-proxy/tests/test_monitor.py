@@ -15,7 +15,10 @@ from teams_copilot_proxy.app import create_app
 from teams_copilot_proxy.config import Settings
 from teams_copilot_proxy.guards import TOOL_PARSE_FAILURE
 from teams_copilot_proxy.monitor import RequestRecord, SQLiteSink
-from teams_copilot_proxy.substrate_client import SubstrateCopilotError
+from teams_copilot_proxy.substrate_client import (
+    SubstrateCopilotError,
+    SubstrateThrottledError,
+)
 
 AUTH = {"Authorization": "Bearer fake-token"}
 
@@ -275,6 +278,155 @@ def test_monitor_init_failure_does_not_break_chat(tmp_path) -> None:
     body = chat(client)
     assert body["choices"][0]["message"]["content"] == "copilot reply"
     assert client.get("/monitor/api/summary", headers=AUTH).status_code == 404
+
+
+GOOD_TOOL_REPLY = (
+    '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```'
+)
+
+
+def test_tool_call_recorded_and_closed_by_next_turn(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done", "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s1"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read"
+
+    # 未闭环：有调用、无结果
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools == [
+        {
+            "name": "read",
+            "category": "builtin",
+            "calls": 1,
+            "closed": 0,
+            "errors": 0,
+            "result_bytes": 0,
+            "error_rate": 0.0,
+        }
+    ]
+
+    # 下一轮携带工具结果（OpenCode 全量 transcript）→ 闭环出 error 标记与字节数
+    followup = {
+        "model": "claude-sonnet",
+        "tools": SAMPLE_TOOLS,
+        "messages": [
+            {"role": "user", "content": "Read main.py"},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": "Error: file not found",
+            },
+        ],
+    }
+    assert (
+        client.post("/v1/chat/completions", json=followup, headers=headers).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["closed"] == 1
+    assert tools[0]["errors"] == 1
+    assert tools[0]["error_rate"] == 1.0
+    assert tools[0]["result_bytes"] == len("Error: file not found")
+
+    # 再重发同一 transcript：已闭环的调用不会被重复计数
+    assert (
+        client.post("/v1/chat/completions", json=followup, headers=headers).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["calls"] == 1
+    assert tools[0]["closed"] == 1
+
+
+def test_errors_timeline_contains_guard_and_throttled(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert any(e["type"] == "guard" and TOOL_PARSE_FAILURE in e["detail"] for e in errors)
+
+
+def test_errors_timeline_records_throttled_upstream(tmp_path) -> None:
+    class ThrottledClient(FakeCopilotClient):
+        async def chat(
+            self,
+            prompt: str,
+            additional_context: list[str],
+            session: object | None = None,
+        ) -> str:
+            raise SubstrateThrottledError("too many requests")
+
+    client = build_monitor_client(ThrottledClient(), tmp_path)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 429
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert errors[0]["type"] == "throttled"
+    assert "too many requests" in errors[0]["detail"]
+
+
+def test_session_aggregation_endpoint(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    headers = {"x-session-id": "thread-42"}
+    chat(client, headers=headers)
+    chat(client, headers=headers)
+
+    detail = client.get("/monitor/api/sessions/thread-42", headers=AUTH).json()
+    assert detail["summary"]["requests"] == 2
+    assert detail["summary"]["total_tokens"] > 0
+    assert detail["summary"]["errors"] == 0
+    assert len(detail["requests"]) == 2
+    assert detail["tool_calls"] == []
+    assert detail["events"] == []
+
+    assert (
+        client.get("/monitor/api/sessions/no-such-key", headers=AUTH).status_code
+        == 404
+    )
+
+
+def test_stream_aggregate_metrics_recorded(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as response:
+        for _ in response.iter_text():
+            pass
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["chunk_count"] == 2
+    assert entry["stream_complete"] == 1
+    assert entry["first_chunk_ms"] is not None
+    # 正常完成的流不应出现 stream_incomplete 事件
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert all(e["type"] != "stream_incomplete" for e in errors)
+
+
+def test_tool_category_buckets() -> None:
+    from teams_copilot_proxy.monitor import tool_category
+
+    assert tool_category("write") == "builtin"
+    assert tool_category("mcp__github__create_issue") == "mcp"
+    assert tool_category("task") == "task"
+    assert tool_category("skill") == "skill"
+    assert tool_category("todowrite") == "todowrite"
+    assert tool_category("webfetch") == "webfetch"
+    assert tool_category("somethingelse") == "other"
 
 
 def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:

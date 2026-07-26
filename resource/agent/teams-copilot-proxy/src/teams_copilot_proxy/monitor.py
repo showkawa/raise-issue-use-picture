@@ -35,6 +35,38 @@ STATUS_OK = "ok"
 STATUS_GUARD = "guard"
 STATUS_ERROR = "error"
 
+# 工具分类（OpenCode 视角）
+_BUILTIN_TOOLS = {
+    "read",
+    "write",
+    "edit",
+    "multiedit",
+    "bash",
+    "glob",
+    "grep",
+    "list",
+    "ls",
+    "patch",
+    "question",
+}
+
+
+def tool_category(name: str) -> str:
+    lowered = name.lower()
+    if lowered.startswith("mcp__") or lowered.startswith("mcp_"):
+        return "mcp"
+    if lowered == "task":
+        return "task"
+    if lowered == "skill" or lowered.startswith("skill_"):
+        return "skill"
+    if lowered in ("todowrite", "todoread"):
+        return "todowrite"
+    if lowered in ("webfetch", "websearch", "web_search", "web_fetch"):
+        return "webfetch"
+    if lowered in _BUILTIN_TOOLS:
+        return "builtin"
+    return "other"
+
 
 def _truncate(text: str | None, limit: int = _SNIPPET_LIMIT) -> str | None:
     if not text:
@@ -58,6 +90,36 @@ class AttemptRecord:
 
 
 @dataclass
+class ToolCallRecord:
+    """模型发起的一次 tool_call（由 OpenCode 在客户端本地执行）。"""
+
+    call_id: str
+    name: str
+    category: str
+    args_bytes: int
+
+
+@dataclass
+class ToolResultRecord:
+    """下一轮请求 transcript 中出现的工具执行结果（轻量闭环：只记 error 与字节数）。"""
+
+    call_id: str | None
+    name: str | None
+    is_error: bool
+    result_bytes: int
+
+
+@dataclass
+class StreamStats:
+    """流式请求的聚合指标（不逐 chunk 落库）。"""
+
+    first_chunk_ms: int | None = None
+    chunk_count: int = 0
+    avg_chunk_interval_ms: int | None = None
+    complete: bool = False
+
+
+@dataclass
 class RequestRecord:
     """一次 /v1/chat/completions 请求的聚合监控记录。"""
 
@@ -74,9 +136,13 @@ class RequestRecord:
     total_tokens: int = 0
     duration_ms: int = 0
     error: str | None = None
+    error_type: str | None = None
     prompt_summary: str | None = None
     reply_snippet: str | None = None
     attempts: list[AttemptRecord] = field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    tool_results: list[ToolResultRecord] = field(default_factory=list)
+    stream_stats: StreamStats = field(default_factory=StreamStats)
 
 
 class RequestRecorder:
@@ -111,6 +177,66 @@ class RequestRecorder:
     def attempt_timer(self) -> float:
         return time.perf_counter()
 
+    def record_tool_calls(self, calls: list[dict]) -> None:
+        """记录本次回复中模型发起的 tool_call（OpenAI 格式）。"""
+        try:
+            for call in calls:
+                function = call.get("function", {})
+                name = function.get("name", "")
+                self.record.tool_calls.append(
+                    ToolCallRecord(
+                        call_id=call.get("id", ""),
+                        name=name,
+                        category=tool_category(name),
+                        args_bytes=len(
+                            function.get("arguments", "").encode("utf-8")
+                        ),
+                    )
+                )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor record_tool_calls failed", exc_info=True)
+
+    def record_tool_result(
+        self,
+        *,
+        call_id: str | None,
+        name: str | None,
+        is_error: bool,
+        result_bytes: int,
+    ) -> None:
+        """记录本次请求 transcript 里携带的工具执行结果，用于闭环配对。"""
+        try:
+            self.record.tool_results.append(
+                ToolResultRecord(
+                    call_id=call_id,
+                    name=name,
+                    is_error=is_error,
+                    result_bytes=result_bytes,
+                )
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor record_tool_result failed", exc_info=True)
+
+    def stream_chunk(self) -> None:
+        """每个 SSE 内容 chunk 调一次；只更新聚合指标，不落库。"""
+        try:
+            stats = self.record.stream_stats
+            now = time.perf_counter()
+            if stats.first_chunk_ms is None:
+                stats.first_chunk_ms = int((now - self._t0) * 1000)
+            stats.chunk_count += 1
+            elapsed_ms = (now - self._t0) * 1000 - stats.first_chunk_ms
+            if stats.chunk_count > 1:
+                stats.avg_chunk_interval_ms = int(
+                    elapsed_ms / (stats.chunk_count - 1)
+                )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor stream_chunk failed", exc_info=True)
+
+    def stream_complete(self) -> None:
+        """流式回复正常发出 [DONE] 时调用。"""
+        self.record.stream_stats.complete = True
+
     def add_attempt(
         self,
         started: float,
@@ -143,12 +269,14 @@ class RequestRecorder:
         input_text: str = "",
         output_text: str = "",
         error: str | None = None,
+        error_type: str | None = None,
     ) -> None:
         try:
             rec = self.record
             rec.status = status
             rec.guard = guard
             rec.error = _truncate(error, 512)
+            rec.error_type = error_type
             rec.duration_ms = int((time.perf_counter() - self._t0) * 1000)
             rec.prompt_tokens = estimate_tokens(input_text)
             rec.completion_tokens = estimate_tokens(output_text)
@@ -182,6 +310,18 @@ class _NullRecorder:
         return 0.0
 
     def add_attempt(self, *args, **kwargs) -> None:
+        return None
+
+    def record_tool_calls(self, calls: list[dict]) -> None:
+        return None
+
+    def record_tool_result(self, **kwargs) -> None:
+        return None
+
+    def stream_chunk(self) -> None:
+        return None
+
+    def stream_complete(self) -> None:
         return None
 
     def finish(self, *args, **kwargs) -> None:
@@ -219,8 +359,40 @@ class SQLiteSink:
                     total_tokens INTEGER,
                     duration_ms INTEGER,
                     error TEXT,
+                    error_type TEXT,
                     prompt_summary TEXT,
-                    reply_snippet TEXT
+                    reply_snippet TEXT,
+                    first_chunk_ms INTEGER,
+                    chunk_count INTEGER,
+                    avg_chunk_interval_ms INTEGER,
+                    stream_complete INTEGER
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tool_calls (
+                    call_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
+                    session_key TEXT,
+                    ts REAL NOT NULL,
+                    name TEXT,
+                    category TEXT,
+                    args_bytes INTEGER,
+                    result_error INTEGER,
+                    result_bytes INTEGER
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    request_id TEXT,
+                    session_key TEXT,
+                    type TEXT NOT NULL,
+                    detail TEXT
                 )
                 """
             )
@@ -244,6 +416,13 @@ class SQLiteSink:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_requests_session ON requests(session_key)"
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tool_calls_session "
+                "ON tool_calls(session_key, name)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)"
+            )
 
     def write(self, rec: RequestRecord) -> None:
         with self._lock, self._conn:
@@ -252,8 +431,10 @@ class SQLiteSink:
                 INSERT OR REPLACE INTO requests (
                     id, ts, session_key, model, tone, stream, status, guard,
                     prompt_tokens, completion_tokens, total_tokens, duration_ms,
-                    error, prompt_summary, reply_snippet
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    error, error_type, prompt_summary, reply_snippet,
+                    first_chunk_ms, chunk_count, avg_chunk_interval_ms,
+                    stream_complete
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     rec.id,
@@ -269,10 +450,36 @@ class SQLiteSink:
                     rec.total_tokens,
                     rec.duration_ms,
                     rec.error,
+                    rec.error_type,
                     rec.prompt_summary,
                     rec.reply_snippet,
+                    rec.stream_stats.first_chunk_ms,
+                    rec.stream_stats.chunk_count if rec.stream else None,
+                    rec.stream_stats.avg_chunk_interval_ms,
+                    (1 if rec.stream_stats.complete else 0) if rec.stream else None,
                 ),
             )
+            for call in rec.tool_calls:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO tool_calls (
+                        call_id, request_id, session_key, ts, name, category,
+                        args_bytes, result_error, result_bytes
+                    ) VALUES (?,?,?,?,?,?,?,NULL,NULL)
+                    """,
+                    (
+                        call.call_id,
+                        rec.id,
+                        rec.session_key,
+                        rec.ts,
+                        call.name,
+                        call.category,
+                        call.args_bytes,
+                    ),
+                )
+            for result in rec.tool_results:
+                self._close_tool_call(rec.session_key, result)
+            self._derive_events(rec)
             for a in rec.attempts:
                 self._conn.execute(
                     """
@@ -285,6 +492,60 @@ class SQLiteSink:
         self._writes += 1
         if self._writes % 50 == 0:
             self.cleanup()
+
+    def _close_tool_call(self, session_key: str | None, result: ToolResultRecord) -> None:
+        """把工具结果配对回未闭环的 tool_call：优先 call_id，其次同会话同名最早一条；
+        配不上则留空（OpenCode 每轮重发全量 transcript，只更新未闭环行即可天然去重）。"""
+        error_flag = 1 if result.is_error else 0
+        if result.call_id:
+            cursor = self._conn.execute(
+                "UPDATE tool_calls SET result_error = ?, result_bytes = ? "
+                "WHERE call_id = ? AND result_bytes IS NULL",
+                (error_flag, result.result_bytes, result.call_id),
+            )
+            if cursor.rowcount:
+                return
+            # call_id 已闭环（transcript 重发）或未知：尝试名称配对前先确认未闭环过
+            known = self._conn.execute(
+                "SELECT 1 FROM tool_calls WHERE call_id = ?", (result.call_id,)
+            ).fetchone()
+            if known:
+                return
+        if not result.name:
+            return
+        row = self._conn.execute(
+            "SELECT call_id FROM tool_calls WHERE session_key = ? AND name = ? "
+            "AND result_bytes IS NULL ORDER BY ts LIMIT 1",
+            (session_key, result.name),
+        ).fetchone()
+        if row:
+            self._conn.execute(
+                "UPDATE tool_calls SET result_error = ?, result_bytes = ? "
+                "WHERE call_id = ?",
+                (error_flag, result.result_bytes, row[0]),
+            )
+
+    def _derive_events(self, rec: RequestRecord) -> None:
+        """从请求记录派生错误/守卫时间线事件。"""
+        events: list[tuple[str, str | None]] = []
+        if rec.status == STATUS_ERROR:
+            events.append((rec.error_type or "upstream_error", rec.error))
+        for attempt in rec.attempts:
+            if attempt.guard:
+                detail = attempt.guard + (" (retried)" if attempt.retried else "")
+                events.append(("guard", detail))
+        if (
+            rec.stream
+            and rec.status == STATUS_OK
+            and not rec.stream_stats.complete
+        ):
+            events.append(("stream_incomplete", None))
+        for event_type, detail in events:
+            self._conn.execute(
+                "INSERT INTO events (ts, request_id, session_key, type, detail) "
+                "VALUES (?,?,?,?,?)",
+                (rec.ts, rec.id, rec.session_key, event_type, detail),
+            )
 
     def cleanup(self) -> None:
         if not self.retention_days or self.retention_days <= 0:
@@ -304,6 +565,8 @@ class SQLiteSink:
                 self._conn.execute(
                     "DELETE FROM requests WHERE ts < ?", (cutoff,)
                 )
+            self._conn.execute("DELETE FROM tool_calls WHERE ts < ?", (cutoff,))
+            self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
 
     # --- 只读查询（/monitor API 使用）---
 
@@ -355,6 +618,108 @@ class SQLiteSink:
                     "SELECT * FROM requests ORDER BY ts DESC LIMIT ?", (limit,)
                 ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def tools(self) -> list[dict]:
+        """工具调用排行：调用数、闭环数、失败数与失败率（按已闭环计算）。"""
+        conn = self._readonly_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    name,
+                    category,
+                    COUNT(*) AS calls,
+                    SUM(CASE WHEN result_bytes IS NOT NULL THEN 1 ELSE 0 END)
+                        AS closed,
+                    SUM(CASE WHEN result_error = 1 THEN 1 ELSE 0 END) AS errors,
+                    COALESCE(SUM(result_bytes), 0) AS result_bytes
+                FROM tool_calls
+                GROUP BY name, category
+                ORDER BY calls DESC
+                """
+            ).fetchall()
+            tools = []
+            for row in rows:
+                data = dict(row)
+                closed = data["closed"] or 0
+                data["error_rate"] = (data["errors"] / closed) if closed else 0.0
+                tools.append(data)
+            return tools
+        finally:
+            conn.close()
+
+    def errors(self, limit: int = 100) -> list[dict]:
+        """守卫与 substrate 错误事件时间线（时间倒序）。"""
+        conn = self._readonly_conn()
+        try:
+            rows = conn.execute(
+                "SELECT ts, request_id, session_key, type, detail FROM events "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def session_detail(self, session_key: str) -> dict | None:
+        """单会话累计（token/请求/错误）与事件流。"""
+        conn = self._readonly_conn()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS requests,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END), 0)
+                        AS errors,
+                    COALESCE(SUM(CASE WHEN guard IS NOT NULL THEN 1 ELSE 0 END), 0)
+                        AS guarded,
+                    MIN(ts) AS first_ts,
+                    MAX(ts) AS last_ts
+                FROM requests WHERE session_key = ?
+                """,
+                (session_key,),
+            ).fetchone()
+            summary = dict(row)
+            if not summary["requests"]:
+                return None
+            summary["session_key"] = session_key
+            requests = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT id, ts, model, tone, stream, status, guard, "
+                    "total_tokens, duration_ms FROM requests "
+                    "WHERE session_key = ? ORDER BY ts",
+                    (session_key,),
+                ).fetchall()
+            ]
+            tool_calls = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT call_id, request_id, ts, name, category, args_bytes, "
+                    "result_error, result_bytes FROM tool_calls "
+                    "WHERE session_key = ? ORDER BY ts",
+                    (session_key,),
+                ).fetchall()
+            ]
+            events = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT ts, request_id, type, detail FROM events "
+                    "WHERE session_key = ? ORDER BY ts",
+                    (session_key,),
+                ).fetchall()
+            ]
+            return {
+                "summary": summary,
+                "requests": requests,
+                "tool_calls": tool_calls,
+                "events": events,
+            }
         finally:
             conn.close()
 

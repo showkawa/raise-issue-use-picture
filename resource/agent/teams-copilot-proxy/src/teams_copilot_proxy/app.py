@@ -266,6 +266,7 @@ def create_app(
                 allow_parallel,
                 settings.dedup_websearch,
             )
+            _record_tool_results(recorder, request.messages)
             translated = _redact_translated(translated, settings)
             client.tone = selected_tone
             client.images = translated.images
@@ -334,6 +335,8 @@ def create_app(
                     input_text,
                     completion_id=request_id,
                 )
+                message = body["choices"][0]["message"]
+                recorder.record_tool_calls(message.get("tool_calls") or [])
                 recorder.finish(
                     status=STATUS_GUARD if outcome.guard else STATUS_OK,
                     guard=outcome.guard,
@@ -345,10 +348,20 @@ def create_app(
             text = await client.chat(translated.prompt, translated.additional_context, session)
             recorder.add_attempt(started, status=STATUS_OK)
         except ValueError as exc:
-            recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
+            recorder.finish(
+                status=STATUS_ERROR,
+                input_text=input_text,
+                error=str(exc),
+                error_type="bad_request",
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SubstrateCopilotError as exc:
-            recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
+            recorder.finish(
+                status=STATUS_ERROR,
+                input_text=input_text,
+                error=str(exc),
+                error_type=_substrate_error_type(exc),
+            )
             raise _upstream_http_error(exc) from exc
 
         recorder.finish(
@@ -392,7 +405,56 @@ def create_app(
             raise HTTPException(status_code=404, detail="request not found")
         return detail
 
+    @app.get("/monitor/api/tools")
+    async def monitor_tools(raw_request: Request) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"tools": monitor.sink.tools()}
+
+    @app.get("/monitor/api/errors")
+    async def monitor_errors(raw_request: Request, limit: int = 100) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"errors": monitor.sink.errors(limit=limit)}
+
+    @app.get("/monitor/api/sessions/{session_key}")
+    async def monitor_session(raw_request: Request, session_key: str) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        detail = monitor.sink.session_detail(session_key)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return detail
+
     return app
+
+
+def _substrate_error_type(exc: SubstrateCopilotError) -> str:
+    if isinstance(exc, SubstrateThrottledError):
+        return "throttled"
+    if isinstance(exc, SubstrateDisengagedError):
+        return "disengaged"
+    return "upstream_error"
+
+
+def _record_tool_results(recorder, messages: Sequence[OpenAIMessage]) -> None:
+    """把 transcript 里的工具执行结果交给 Monitor 做轻量闭环（只提 error 标记与
+    字节数，不存结果全文）。配对发生在 sink 写入时，不影响主链路。"""
+    call_names: dict[str, str] = {}
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            for call in message.tool_calls:
+                call_names[call.id] = call.function.name
+        if message.role != "tool":
+            continue
+        content = flatten_content(message.content)
+        name = message.name or call_names.get(message.tool_call_id or "")
+        recorder.record_tool_result(
+            call_id=message.tool_call_id,
+            name=name,
+            is_error=content.lstrip().lower().startswith("error"),
+            result_bytes=len(content.encode("utf-8")),
+        )
 
 
 def _completion_output_text(body: dict) -> str:
@@ -649,7 +711,10 @@ async def _openai_stream_with_tools(
             outcome = await resolve_task
         except SubstrateCopilotError as exc:
             recorder.finish(
-                status=STATUS_ERROR, input_text=input_text, error=str(exc)
+                status=STATUS_ERROR,
+                input_text=input_text,
+                error=str(exc),
+                error_type=_substrate_error_type(exc),
             )
             yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
             yield "data: [DONE]\n\n"
@@ -657,8 +722,11 @@ async def _openai_stream_with_tools(
 
         if outcome.tool_calls:
             calls = [tc.as_openai() for tc in outcome.tool_calls]
+            recorder.record_tool_calls(calls)
             if outcome.text:
+                recorder.stream_chunk()
                 yield chunk({"content": outcome.text})
+            recorder.stream_chunk()
             yield chunk({
                 "tool_calls": [
                     {
@@ -685,11 +753,13 @@ async def _openai_stream_with_tools(
                 for index, piece in enumerate(pieces):
                     if index and chunk_delay_ms > 0:
                         await asyncio.sleep(chunk_delay_ms / 1000)
+                    recorder.stream_chunk()
                     yield chunk({"content": piece})
             extra = {"usage": openai_usage(input_text, outcome.text or "")}
             if outcome.guard:
                 extra["x_m365_guard"] = {"guard": outcome.guard, "retries_exhausted": True}
             yield chunk({}, "stop", extra)
+        recorder.stream_complete()
         recorder.finish(
             status=STATUS_GUARD if outcome.guard else STATUS_OK,
             guard=outcome.guard,
@@ -726,6 +796,7 @@ async def _openai_stream(
     try:
         async for delta in client.chat_stream(prompt, additional_context, session):
             full_text += delta
+            recorder.stream_chunk()
             chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -736,11 +807,17 @@ async def _openai_stream(
             yield f"data: {json.dumps(chunk)}\n\n"
     except SubstrateCopilotError as exc:
         recorder.add_attempt(started, status=STATUS_ERROR)
-        recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
+        recorder.finish(
+            status=STATUS_ERROR,
+            input_text=input_text,
+            error=str(exc),
+            error_type=_substrate_error_type(exc),
+        )
         yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
         yield "data: [DONE]\n\n"
         return
     recorder.add_attempt(started, status=STATUS_OK, text=full_text)
+    recorder.stream_complete()
     recorder.finish(status=STATUS_OK, input_text=input_text, output_text=full_text)
     final_chunk = {
         "id": completion_id,
