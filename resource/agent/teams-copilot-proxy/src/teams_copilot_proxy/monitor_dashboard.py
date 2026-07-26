@@ -1,7 +1,8 @@
-"""只读 Monitor 面板：单页 HTML，浏览器端用 Bearer token 轮询 /monitor/api/*。
+"""只读 Monitor 面板：单页 HTML，浏览器端轮询 /monitor/api/*。
 
-页面本身不含任何数据；所有数据请求都带 Authorization 头，token 首次输入后存
-localStorage。纯只读——无配置修改、无清库、无导出。
+回环客户端（127.0.0.1）默认免 Bearer 直连，页面顶部显示当前 substrate token
+状态（掩码 + 过期时间）并提供一键复制；非回环访问仍需输入 Bearer token
+（存 localStorage）。纯只读——无配置修改、无清库、无导出。
 """
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -42,10 +43,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button data-view="requests">Requests</button>
     <button data-view="errors">Errors</button>
   </nav>
-  <span id="status" class="muted" style="margin-left:auto;font-size:12px"></span>
+  <span id="tokeninfo" class="muted" style="margin-left:auto;font-size:12px"></span>
+  <button id="copytoken" style="display:none;background:#274b73;color:#cde;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:12px" onclick="copyToken()">copy token</button>
+  <span id="status" class="muted" style="font-size:12px"></span>
 </header>
 <div id="tokenbar">
-  Bearer token required:
+  Bearer token required (remote access only):
   <input id="token" type="password" placeholder="paste proxy token">
   <button onclick="saveToken()">Save</button>
 </div>
@@ -72,6 +75,28 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 function fmtTs(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+async function loadSession() {
+  try {
+    const s = await api('session');
+    const t = s.token || {};
+    const label = (t.valid ? 'token ' : 'token INVALID ')
+      + (t.masked || '') + (t.seconds_remaining != null ? ' · ' + Math.floor(t.seconds_remaining / 60) + 'min left' : '');
+    document.getElementById('tokeninfo').textContent = label;
+    document.getElementById('copytoken').style.display = s.loopback ? '' : 'none';
+  } catch (e) { /* 401 handled by api() */ }
+}
+async function copyToken() {
+  try {
+    const d = await api('token');
+    await navigator.clipboard.writeText(d.access_token);
+    const btn = document.getElementById('copytoken');
+    btn.textContent = 'copied!';
+    setTimeout(() => { btn.textContent = 'copy token'; }, 1500);
+  } catch (e) {
+    document.getElementById('status').textContent = 'copy failed: ' + e.message;
+  }
+}
 function card(k, v) { return `<div class="card"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`; }
 
 async function renderSummary() {
@@ -153,6 +178,7 @@ async function renderErrors() {
 }
 
 async function refresh() {
+  loadSession();
   try {
     document.getElementById('status').textContent = 'refreshing…';
     if (view === 'summary') await renderSummary();

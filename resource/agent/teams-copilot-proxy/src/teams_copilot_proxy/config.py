@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     monitor_retention_days: int = Field(default=30, alias="M365_MONITOR_RETENTION_DAYS")
     # /monitor 查询与面板复用的 Bearer token；未单独配置时回退到 access_token。
     monitor_token: str = Field(default="", alias="M365_MONITOR_TOKEN")
+    # 回环（127.0.0.1/::1）客户端免 Bearer 直接访问 /monitor API；置 false 恢复严格模式。
+    monitor_loopback_open: bool = Field(
+        default=True, alias="M365_MONITOR_LOOPBACK_OPEN"
+    )
 
     # --- PKCE OAuth token 获取（ADR-0008，opt-in）---
     # 通过标准 Microsoft identity platform OAuth 2.0 + PKCE 拿 refresh_token，

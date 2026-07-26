@@ -240,9 +240,11 @@ uv run teams-copilot-proxy login-device
 
 Both commands cache the token set to `.oauth_tokens.json` (owner-only
 permissions) and write `M365_ACCESS_TOKEN` to `.env`. Once a `refresh_token` is
-cached, `serve` prefers OAuth refresh over the Chrome WebSocket scrape (falling
-back to Chrome if OAuth refresh fails), so you can run `serve --no-launch-chrome`.
-Force a one-off refresh with:
+cached, `serve` runs an eager OAuth refresh at startup (every boot begins on a
+fresh substrate token) and prefers OAuth refresh over the Chrome WebSocket
+scrape in the background auto-refresh loop (falling back to Chrome if OAuth
+refresh fails), so you can run `serve --no-launch-chrome`. `--no-auto-refresh`
+disables both. Force a one-off refresh with:
 
 ```bat
 uv run teams-copilot-proxy oauth-refresh
@@ -296,7 +298,9 @@ Example:
 | `GET /v1/token/status` | Token validity, expiry time, and seconds remaining |
 | `GET /v1/models` | OpenAI-compatible model list |
 | `POST /v1/chat/completions` | OpenAI Chat Completions (the endpoint OpenCode uses), streaming and tool calling supported |
-| `GET /monitor` | Read-only monitoring dashboard (static page; data calls need the Bearer token) |
+| `GET /monitor` | Read-only monitoring dashboard (static page; loopback clients need no token, remote data calls need the Bearer token) |
+| `GET /monitor/api/session` | Dashboard bootstrap: current substrate token status (masked, never the full value) |
+| `GET /monitor/api/token` | Full current substrate token — loopback clients only (dashboard “copy token” button) |
 | `GET /monitor/api/summary` | Aggregate counters: requests, tokens, error/guard rates, tone breakdown |
 | `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=`) |
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
@@ -324,7 +328,7 @@ What is recorded:
 
 Capture policy (`M365_MONITOR_CAPTURE`): `failures` (default) keeps redacted prompt/reply excerpts (~2 KB each) only for failed or guard-triggered requests; `all` keeps them for every request; `off` stores metadata only. Rows older than `M365_MONITOR_RETENTION_DAYS` (default 30) are cleaned up automatically.
 
-Open `http://127.0.0.1:8000/monitor` for the read-only dashboard (Summary — including a **Tool planning (baseline for router A/B)** table — / Requests with attempt-chain drill-down / Errors). The page asks for the Bearer token once and keeps it in `localStorage`; the token is `M365_MONITOR_TOKEN` if set, otherwise the current `M365_ACCESS_TOKEN`. Sessions are grouped by an `x-session-id` request header when present, otherwise by a hash of the conversation's first user message.
+Open `http://127.0.0.1:8000/monitor` for the read-only dashboard (Summary — including a **Tool planning (baseline for router A/B)** table — / Requests with attempt-chain drill-down / Errors). Loopback clients (127.0.0.1/::1) get in without typing any token (disable with `M365_MONITOR_LOOPBACK_OPEN=false`); the header shows the current substrate token (masked) with its remaining lifetime and a **copy token** button (loopback only). Non-loopback access still asks for the Bearer token once and keeps it in `localStorage`; that token is `M365_MONITOR_TOKEN` if set, otherwise the current `M365_ACCESS_TOKEN`. Sessions are grouped by an `x-session-id` request header when present, otherwise by a hash of the conversation's first user message.
 
 ## Environment Variables
 
@@ -357,6 +361,7 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_MONITOR_CAPTURE` | `failures` | Optional. Content capture policy: `off` (metadata only), `failures` (excerpts only for failed/guard-triggered requests), `all`. |
 | `M365_MONITOR_RETENTION_DAYS` | `30` | Optional. Monitor rows older than this are deleted automatically. |
 | `M365_MONITOR_TOKEN` | unset | Optional. Separate Bearer token for `/monitor/api/*`; falls back to `M365_ACCESS_TOKEN` when empty. |
+| `M365_MONITOR_LOOPBACK_OPEN` | `true` | Optional. Loopback (127.0.0.1/::1) clients may use `/monitor` and `/monitor/api/*` without a Bearer token. Set `false` to require the token even locally. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
 | `M365_OAUTH_CLIENT_ID` | Office web Copilot client | Optional. Public client used for the PKCE `login`/`login-device` flow (ADR-0008). |
 | `M365_OAUTH_AUTHORITY` | `https://login.microsoftonline.com/common` | Optional. OAuth authority (multi-tenant by default). |

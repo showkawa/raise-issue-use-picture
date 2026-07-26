@@ -527,6 +527,10 @@ def capture_token_command(args: argparse.Namespace) -> None:
 def serve_command(args: argparse.Namespace) -> None:
     cdp_port: int = args.cdp_port
     while True:
+        if not args.no_auto_refresh:
+            # Eager browserless refresh: boot on the freshest substrate token
+            # whenever a cached OAuth refresh_token is available.
+            _try_oauth_refresh()
         app = create_app()
         config = uvicorn.Config(app, host=args.host, port=args.port)
         server = uvicorn.Server(config)

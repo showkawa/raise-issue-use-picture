@@ -68,7 +68,10 @@ class ErrorCopilotClient(FakeCopilotClient):
 
 
 def build_monitor_client(
-    fake: FakeCopilotClient, tmp_path, **overrides
+    fake: FakeCopilotClient,
+    tmp_path,
+    client_addr: tuple[str, int] | None = None,
+    **overrides,
 ) -> TestClient:
     kwargs = {
         "M365_ACCESS_TOKEN": "fake-token",
@@ -77,6 +80,8 @@ def build_monitor_client(
     kwargs.update(overrides)
     settings = Settings(**kwargs)
     app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    if client_addr is not None:
+        return TestClient(app, client=client_addr)
     return TestClient(app)
 
 
@@ -107,6 +112,45 @@ def test_monitor_api_requires_bearer_token(tmp_path) -> None:
             == 401
         )
     assert client.get("/monitor/api/summary", headers=AUTH).status_code == 200
+
+
+def test_monitor_api_open_for_loopback_clients(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    assert client.get("/monitor/api/summary").status_code == 200
+
+
+def test_monitor_loopback_open_can_be_disabled(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(),
+        tmp_path,
+        client_addr=("127.0.0.1", 50000),
+        M365_MONITOR_LOOPBACK_OPEN="false",
+    )
+    assert client.get("/monitor/api/summary").status_code == 401
+    assert client.get("/monitor/api/summary", headers=AUTH).status_code == 200
+
+
+def test_monitor_session_reports_masked_token_only(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    body = client.get("/monitor/api/session").json()
+    assert body["loopback"] is True
+    assert "fake-token" not in str(body)
+    assert "masked" in body["token"]
+
+
+def test_monitor_token_reveal_is_loopback_only(tmp_path) -> None:
+    loopback = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    assert loopback.get("/monitor/api/token").json() == {
+        "access_token": "fake-token"
+    }
+    remote = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert remote.get("/monitor/api/token", headers=AUTH).status_code == 403
 
 
 def test_normal_request_records_metadata_without_content(tmp_path) -> None:

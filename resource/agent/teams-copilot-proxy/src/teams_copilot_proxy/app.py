@@ -249,7 +249,13 @@ def create_app(
         )
         return recorder, request_id
 
+    def _client_is_loopback(raw_request: Request) -> bool:
+        client = raw_request.client
+        return bool(client) and client.host in ("127.0.0.1", "::1", "localhost")
+
     def require_monitor_auth(raw_request: Request) -> None:
+        if app.state.settings.monitor_loopback_open and _client_is_loopback(raw_request):
+            return
         expected = app.state.monitor_token
         header = raw_request.headers.get("authorization", "")
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
@@ -489,6 +495,24 @@ def create_app(
         if app.state.monitor is None:
             raise HTTPException(status_code=404, detail="monitor disabled")
         return HTMLResponse(DASHBOARD_HTML)
+
+    @app.get("/monitor/api/session")
+    async def monitor_session_info(raw_request: Request) -> dict:
+        """面板引导信息：当前 substrate token 状态（掩码，不含完整值）。"""
+        require_monitor_auth(raw_request)
+        token = app.state.token_store.get()
+        status = app.state.token_store.status()
+        if token:
+            status["masked"] = f"{token[:8]}\u2026{token[-6:]}" if len(token) > 20 else "\u2026"
+        return {"loopback": _client_is_loopback(raw_request), "token": status}
+
+    @app.get("/monitor/api/token")
+    async def monitor_token_reveal(raw_request: Request) -> dict:
+        """返回完整当前 token，仅限回环客户端（面板“复制 token”按钮用）。"""
+        require_monitor_auth(raw_request)
+        if not _client_is_loopback(raw_request):
+            raise HTTPException(status_code=403, detail="loopback only")
+        return {"access_token": app.state.token_store.get()}
 
     @app.get("/monitor/api/summary")
     async def monitor_summary(raw_request: Request) -> dict:
