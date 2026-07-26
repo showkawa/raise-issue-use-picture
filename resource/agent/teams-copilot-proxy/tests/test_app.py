@@ -2097,10 +2097,11 @@ def test_repeated_identical_failure_injects_strategy_hint() -> None:
 
     assert response.status_code == 200
     _prompt, context = fake.calls[0]
-    assert any("identical arguments" in part for part in context)
+    ledger = next(p for p in context if "EVIDENCE_LEDGER" in p)
+    assert "failed repeatedly" in ledger
 
 
-def test_single_failure_does_not_inject_strategy_hint() -> None:
+def test_single_failure_does_not_inject_repeat_strategy_hint() -> None:
     fake = ToolCallingCopilotClient(["Trying another path."])
     client = build_client(fake)
     transcript = _repeated_failure_transcript()[:3] + [{"role": "user", "content": "continue"}]
@@ -2111,4 +2112,123 @@ def test_single_failure_does_not_inject_strategy_hint() -> None:
 
     assert response.status_code == 200
     _prompt, context = fake.calls[0]
-    assert not any("identical arguments" in part for part in context)
+    # A single completed call still yields an evidence ledger, but without the
+    # "failed repeatedly" / repeat strategy nudge.
+    ledger = next(p for p in context if "EVIDENCE_LEDGER" in p)
+    assert "failed repeatedly" not in ledger
+    assert "already been issued more than once" not in ledger
+
+
+def test_shell_fence_recovered_as_bash_call_when_available() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    text = "Let me list files.\n```bash\nls -la /tmp\n```"
+    outcome = parse_model_output(text, {"bash", "read"})
+    assert outcome.error is None
+    assert outcome.tool_call is not None
+    assert outcome.tool_call.name == "bash"
+    assert outcome.tool_call.arguments == {"command": "ls -la /tmp"}
+
+
+def test_shell_fence_ignored_without_shell_tool() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    text = "Here's how:\n```bash\nls -la\n```"
+    outcome = parse_model_output(text, {"read", "grep"})
+    assert outcome.tool_call is None
+    assert outcome.error is None
+
+
+def test_shell_fence_skipped_when_ambiguous_multiple_blocks() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    text = "```bash\nls\n```\nand also\n```bash\npwd\n```"
+    outcome = parse_model_output(text, {"bash"})
+    assert outcome.tool_call is None
+
+
+def test_bare_command_json_recovered_as_bash() -> None:
+    from teams_copilot_proxy.tool_protocol import parse_model_output
+
+    outcome = parse_model_output('{"command": "echo hi", "timeout": 5}', {"bash"})
+    assert outcome.tool_call is not None
+    assert outcome.tool_call.name == "bash"
+    assert outcome.tool_call.arguments == {"command": "echo hi", "timeout": 5}
+
+
+def test_dedupe_tool_calls_drops_identical_within_reply() -> None:
+    from teams_copilot_proxy.tool_protocol import ParsedToolCall, dedupe_tool_calls
+
+    calls = [
+        ParsedToolCall(name="read", arguments={"path": "a", "n": 1}),
+        ParsedToolCall(name="read", arguments={"n": 1, "path": "a"}),  # key order swap
+        ParsedToolCall(name="read", arguments={"path": "b"}),
+    ]
+    deduped = dedupe_tool_calls(calls)
+    assert [(c.name, c.arguments) for c in deduped] == [
+        ("read", {"path": "a", "n": 1}),
+        ("read", {"path": "b"}),
+    ]
+
+
+def test_parallel_reply_with_duplicate_blocks_is_deduped_end_to_end() -> None:
+    dup = '{"name": "read_file", "arguments": {"path": "a.py"}}'
+    fake = ToolCallingCopilotClient(
+        [f"```tool_call\n{dup}\n```\n```tool_call\n{dup}\n```"]
+    )
+    settings = Settings(
+        M365_ACCESS_TOKEN="fake-token", M365_ALLOW_PARALLEL_TOOL_CALLS=True
+    )
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "read a.py twice"}],
+        },
+    )
+    assert response.status_code == 200
+    calls = response.json()["choices"][0]["message"]["tool_calls"]
+    assert len(calls) == 1
+
+
+def test_agent_ledger_hint_lists_completed_calls() -> None:
+    from teams_copilot_proxy.app import _agent_ledger_hint
+    from teams_copilot_proxy.models import (
+        OpenAIMessage,
+        OpenAIToolCall,
+        OpenAIToolCallFunction,
+    )
+
+    messages = [
+        OpenAIMessage(role="user", content="read a.py"),
+        OpenAIMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                OpenAIToolCall(
+                    id="c1",
+                    function=OpenAIToolCallFunction(
+                        name="read_file", arguments='{"path": "a.py"}'
+                    ),
+                )
+            ],
+        ),
+        OpenAIMessage(role="tool", tool_call_id="c1", content="print('ok')"),
+        OpenAIMessage(role="user", content="continue"),
+    ]
+    hint = _agent_ledger_hint(messages)
+    assert hint is not None
+    assert "EVIDENCE_LEDGER" in hint
+    assert "read_file" in hint
+    assert "failed repeatedly" not in hint
+
+
+def test_agent_ledger_hint_none_without_tool_history() -> None:
+    from teams_copilot_proxy.app import _agent_ledger_hint
+    from teams_copilot_proxy.models import OpenAIMessage
+
+    messages = [OpenAIMessage(role="user", content="hi")]
+    assert _agent_ledger_hint(messages) is None

@@ -21,6 +21,15 @@ _ANY_FENCE_RE = re.compile(
 
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
 
+# Shell code fences the model sometimes emits instead of a tool_call block, e.g.
+# ```bash\nls -la\n```. When a matching shell-type tool is actually available we
+# recover it as a real call rather than leaking it to the client as prose.
+_SHELL_TOOL_NAMES = ("bash", "sh", "shell", "powershell", "cmd")
+_SHELL_FENCE_RE = re.compile(
+    r"```(?:bash|sh|shell|powershell|cmd)[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 TOOL_FAILURE_SENTINEL = (
     "[teams-copilot-proxy] Copilot could not produce a valid tool call after repeated "
     "attempts. Please rephrase the request or continue manually."
@@ -269,6 +278,9 @@ def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
         fenced = _try_fenced_json(cleaned, allowed_names)
         if fenced is not None:
             return fenced
+        shell = _try_shell_fallback(cleaned, allowed_names)
+        if shell is not None:
+            return shell
         return ToolParseOutcome(text=cleaned.strip())
 
     body = match.group("body").strip()
@@ -356,6 +368,61 @@ def _try_bare_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome | 
     return _validate_payload(payload, allowed_names, "", cleaned)
 
 
+def _shell_tool_name(allowed_names: set[str]) -> str | None:
+    for candidate in _SHELL_TOOL_NAMES:
+        if candidate in allowed_names:
+            return candidate
+    return None
+
+
+def _try_shell_fallback(
+    cleaned: str, allowed_names: set[str]
+) -> ToolParseOutcome | None:
+    """Recover a shell command the model emitted as a ```bash/sh/... fence (or a
+    bare ``{"command": ...}`` object) into a real call for an available shell tool.
+
+    Only fires when a shell-type tool (bash/sh/shell/powershell/cmd) is actually
+    in the tool set, and only for a single unambiguous block, so ordinary prose
+    or illustrative snippets are never turned into executions.
+    """
+    target = _shell_tool_name(allowed_names)
+    if target is None:
+        return None
+    matches = list(_SHELL_FENCE_RE.finditer(cleaned))
+    if len(matches) == 1:
+        command = matches[0].group("body").strip()
+        if not command:
+            return None
+        leading = cleaned[: matches[0].start()].strip()
+        return ToolParseOutcome(
+            text=leading,
+            tool_calls=[ParsedToolCall(name=target, arguments={"command": command})],
+        )
+    if matches:
+        return None
+    # A bare JSON object carrying a "command" (no "name") — some reasoning models
+    # emit this instead of the tool_call envelope.
+    candidate = cleaned.strip()
+    if not candidate.startswith("{"):
+        return None
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or "name" in payload:
+        return None
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    arguments: dict[str, Any] = {"command": command}
+    for key in ("timeout", "workdir"):
+        if payload.get(key) is not None:
+            arguments[key] = payload[key]
+    return ToolParseOutcome(
+        text="", tool_calls=[ParsedToolCall(name=target, arguments=arguments)]
+    )
+
+
 def _validate_payload(
     payload: Any,
     allowed_names: set[str],
@@ -384,6 +451,26 @@ def _validate_payload(
         text=leading_text,
         tool_calls=[ParsedToolCall(name=name, arguments=arguments)],
     )
+
+
+def dedupe_tool_calls(calls: list[ParsedToolCall]) -> list[ParsedToolCall]:
+    """Drop byte-identical duplicate calls (same name + canonical arguments)
+    within a single reply, keeping first occurrence. Prevents a parallel reply
+    from asking the client to run the exact same operation twice; always keeps
+    at least one call when the input is non-empty."""
+    seen: set[str] = set()
+    out: list[ParsedToolCall] = []
+    for call in calls:
+        try:
+            canon = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            canon = repr(call.arguments)
+        key = f"{call.name}\x00{canon}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(call)
+    return out
 
 
 def correction_prompt(error: str, *, strict: bool = False) -> str:

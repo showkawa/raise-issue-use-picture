@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -56,6 +57,7 @@ from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
     correction_prompt,
+    dedupe_tool_calls,
     parse_model_output,
     parse_model_output_multi,
     tool_names,
@@ -307,9 +309,9 @@ def create_app(
             )
             _record_tool_results(recorder, request.messages)
             if translated.tools:
-                repeat_hint = _repeat_failure_hint(request.messages)
-                if repeat_hint is not None:
-                    translated.additional_context.append(repeat_hint)
+                ledger_hint = _agent_ledger_hint(request.messages)
+                if ledger_hint is not None:
+                    translated.additional_context.append(ledger_hint)
             translated = _redact_translated(translated, settings)
             client.tone = selected_tone
             client.images = translated.images
@@ -487,35 +489,91 @@ def _substrate_error_type(exc: SubstrateCopilotError) -> str:
     return "upstream_error"
 
 
-def _repeat_failure_hint(messages: Sequence[OpenAIMessage]) -> str | None:
-    """Detect the transcript re-running an identical tool call that already
-    failed with an identical error, and build a strategy-change hint for the
-    next model turn. Purely additive context; never blocks the request."""
+def _canonical_args(arguments: str) -> str:
+    """Order-independent canonical form of a tool call's argument JSON so that
+    logically identical calls compare equal regardless of key order/whitespace."""
+    try:
+        return json.dumps(json.loads(arguments), sort_keys=True, ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        return arguments.strip()
+
+
+@dataclass
+class _AgentLedger:
+    """Structured evidence reconstructed from a tool-using transcript.
+
+    ``completed`` pairs each finished call with whether its result signalled a
+    failure. ``repeated_call``/``repeated_failure`` flag loops so the next model
+    turn can be told to change strategy instead of re-issuing the same call.
+    """
+
+    completed: list[tuple[str, str, bool]]  # (name, canonical_args, failed)
+    repeated_call: bool
+    repeated_failure: bool
+
+
+def _build_agent_ledger(messages: Sequence[OpenAIMessage]) -> _AgentLedger:
     call_specs: dict[str, tuple[str, str]] = {}
-    results: list[tuple[str, str, str]] = []
+    completed: list[tuple[str, str, bool]] = []
+    seen_call: dict[str, int] = {}
+    seen_failure: dict[str, int] = {}
+    repeated_call = False
+    repeated_failure = False
     for message in messages:
         if message.role == "assistant" and message.tool_calls:
             for call in message.tool_calls:
-                call_specs[call.id] = (call.function.name, call.function.arguments)
+                canon = _canonical_args(call.function.arguments)
+                call_specs[call.id] = (call.function.name, canon)
+                sig = f"{call.function.name}\x00{canon}"
+                seen_call[sig] = seen_call.get(sig, 0) + 1
+                if seen_call[sig] >= 2:
+                    repeated_call = True
         if message.role != "tool":
             continue
         spec = call_specs.get(message.tool_call_id or "")
         if spec is None:
             continue
-        results.append((spec[0], spec[1], flatten_content(message.content).strip()))
-    if len(results) < 2:
+        name, canon = spec
+        result = flatten_content(message.content).strip()
+        failed = result.lower().startswith("error")
+        completed.append((name, canon, failed))
+        if failed:
+            fsig = f"{name}\x00{canon}\x00{result.lower()[:500]}"
+            seen_failure[fsig] = seen_failure.get(fsig, 0) + 1
+            if seen_failure[fsig] >= 2:
+                repeated_failure = True
+    return _AgentLedger(completed, repeated_call, repeated_failure)
+
+
+def _agent_ledger_hint(messages: Sequence[OpenAIMessage]) -> str | None:
+    """Compact evidence ledger injected before the next model turn: which calls
+    already completed (so they are final evidence and must not be repeated) plus
+    a strategy-change nudge when the transcript is looping. Purely additive
+    context that never blocks the request."""
+    ledger = _build_agent_ledger(messages)
+    if not ledger.completed and not ledger.repeated_call:
         return None
-    name, args, result = results[-1]
-    if not result.lower().startswith("error"):
-        return None
-    if (name, args, result) not in results[:-1]:
-        return None
-    return (
-        f'Note: the tool "{name}" has already been called more than once with '
-        "identical arguments and failed with the identical error each time. "
-        "Repeating the same call will fail again — change the arguments or take "
-        "a different approach."
-    )
+    evidence = [
+        {"name": name, "arguments": args, "failed": failed}
+        for name, args, failed in ledger.completed[-12:]
+    ]
+    lines = [
+        "Tool-call evidence ledger (from results already returned to you). A "
+        "completed call is final evidence; do NOT issue the same tool name with "
+        "the same arguments again — use its result or take a different action.",
+    ]
+    if ledger.repeated_failure:
+        lines.append(
+            "The same call has failed repeatedly with the same error; change the "
+            "arguments or approach instead of retrying it unchanged."
+        )
+    elif ledger.repeated_call:
+        lines.append(
+            "An identical call has already been issued more than once; avoid "
+            "repeating it."
+        )
+    lines.append("EVIDENCE_LEDGER: " + json.dumps(evidence, ensure_ascii=False))
+    return "\n".join(lines)
 
 
 def _record_tool_results(recorder, messages: Sequence[OpenAIMessage]) -> None:
@@ -654,6 +712,7 @@ async def _chat_resolving_tools(
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
         outcome = parse(text, allowed)
         if outcome.error is None and outcome.tool_calls:
+            outcome.tool_calls = dedupe_tool_calls(outcome.tool_calls)
             for call in outcome.tool_calls:
                 schema_error = validate_tool_arguments(
                     call.name, call.arguments, schemas
