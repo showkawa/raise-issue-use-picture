@@ -50,3 +50,13 @@ class Settings(BaseSettings):
     # usually just causes redundant turns.
     dedup_websearch: bool = Field(default=True, alias="M365_DEDUP_WEBSEARCH")
 
+    # --- Monitor (阶段二) ---
+    # 进程内可观测子系统：事件总线 → SQLite sink → 只读 /monitor API。
+    monitor_enabled: bool = Field(default=True, alias="M365_MONITOR_ENABLED")
+    monitor_db_path: str = Field(default="monitor.db", alias="M365_MONITOR_DB_PATH")
+    # 内容留存档位：off（只记元数据）/ failures（失败或守卫触发才留脱敏现场，默认）/ all。
+    monitor_capture: str = Field(default="failures", alias="M365_MONITOR_CAPTURE")
+    monitor_retention_days: int = Field(default=30, alias="M365_MONITOR_RETENTION_DAYS")
+    # /monitor 查询与面板复用的 Bearer token；未单独配置时回退到 access_token。
+    monitor_token: str = Field(default="", alias="M365_MONITOR_TOKEN")
+

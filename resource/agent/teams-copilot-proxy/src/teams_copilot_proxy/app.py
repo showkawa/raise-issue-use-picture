@@ -41,6 +41,15 @@ from .models import (
     OpenAIMessage,
     TranslatedRequest,
 )
+from .monitor import (
+    STATUS_ERROR,
+    STATUS_GUARD,
+    STATUS_OK,
+    MonitorBus,
+    RequestRecorder,
+    SQLiteSink,
+    _NullRecorder,
+)
 from .redaction import redact_outbound
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
@@ -60,6 +69,9 @@ logger = logging.getLogger(__name__)
 
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"
+_MONITOR_SESSION_HEADER = "x-session-id"
+
+_NULL_RECORDER = _NullRecorder()
 
 _TONE_BY_MODEL_PREFIX = (
     ("claude", "Claude_Sonnet"),
@@ -126,6 +138,51 @@ def create_app(
         )
     )
     app.state.capability = None
+    app.state.monitor = None
+    app.state.monitor_token = (
+        resolved_settings.monitor_token or resolved_settings.access_token
+    )
+    if resolved_settings.monitor_enabled:
+        try:
+            sink = SQLiteSink(
+                resolved_settings.monitor_db_path,
+                resolved_settings.monitor_retention_days,
+            )
+            app.state.monitor = MonitorBus(
+                sink, capture=resolved_settings.monitor_capture
+            )
+        except Exception:
+            logger.exception("Monitor init failed; running without monitoring.")
+            app.state.monitor = None
+
+    def new_recorder(raw_request: Request, request: OpenAIChatRequest, tone: str):
+        monitor = app.state.monitor
+        if monitor is None:
+            return _NULL_RECORDER, f"chatcmpl_{uuid.uuid4().hex}"
+        request_id = f"chatcmpl_{uuid.uuid4().hex}"
+        recorder = RequestRecorder(
+            monitor,
+            request_id=request_id,
+            session_key=_monitor_session_key(raw_request, request.messages),
+            model=request.model,
+            tone=tone,
+            stream=bool(request.stream),
+        )
+        return recorder, request_id
+
+    def require_monitor_auth(raw_request: Request) -> None:
+        expected = app.state.monitor_token
+        header = raw_request.headers.get("authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not expected or token != expected:
+            raise HTTPException(status_code=401, detail="invalid monitor token")
+
+    def require_monitor(raw_request: Request) -> MonitorBus:
+        require_monitor_auth(raw_request)
+        monitor = app.state.monitor
+        if monitor is None:
+            raise HTTPException(status_code=404, detail="monitor disabled")
+        return monitor
 
     async def _startup_capability_probe() -> None:
         if not resolved_settings.startup_probe or not resolved_settings.access_token:
@@ -190,10 +247,13 @@ def create_app(
         settings: Settings = Depends(get_settings),
         client: SubstrateCopilotClient = Depends(get_copilot_client),
     ):
+        recorder = _NULL_RECORDER
+        input_text = ""
         try:
             selected_tone = _tone_for_model(
                 request.model, effective_default_tone(settings)
             )
+            recorder, request_id = new_recorder(raw_request, request, selected_tone)
             allow_parallel = settings.allow_parallel_tool_calls or (
                 selected_tone
                 in {tone.strip() for tone in settings.parallel_tool_tones.split(",")}
@@ -241,6 +301,7 @@ def create_app(
                             chunk_chars=settings.stream_chunk_chars,
                             chunk_delay_ms=settings.stream_chunk_delay_ms,
                             input_text=input_text,
+                            recorder=recorder,
                         ),
                         media_type="text/event-stream",
                     )
@@ -252,6 +313,7 @@ def create_app(
                         translated.additional_context,
                         session,
                         input_text=input_text,
+                        recorder=recorder,
                     ),
                     media_type="text/event-stream",
                 )
@@ -264,22 +326,36 @@ def create_app(
                     session,
                     settings.tool_correction_retries,
                     allow_parallel,
+                    recorder=recorder,
                 )
-                return JSONResponse(
-                    _tool_outcome_completion(
-                        settings.model_alias,
-                        outcome,
-                        _combine_text(translated.prompt, translated.additional_context),
-                    )
+                body = _tool_outcome_completion(
+                    settings.model_alias,
+                    outcome,
+                    input_text,
+                    completion_id=request_id,
                 )
+                recorder.finish(
+                    status=STATUS_GUARD if outcome.guard else STATUS_OK,
+                    guard=outcome.guard,
+                    input_text=input_text,
+                    output_text=_completion_output_text(body),
+                )
+                return JSONResponse(body)
+            started = recorder.attempt_timer()
             text = await client.chat(translated.prompt, translated.additional_context, session)
+            recorder.add_attempt(started, status=STATUS_OK)
         except ValueError as exc:
+            recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SubstrateCopilotError as exc:
+            recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
             raise _upstream_http_error(exc) from exc
 
+        recorder.finish(
+            status=STATUS_OK, input_text=input_text, output_text=text
+        )
         return JSONResponse({
-            "id": f"chatcmpl_{uuid.uuid4().hex}",
+            "id": request_id,
             "object": "chat.completion",
             "created": int(time.time()),
             "model": settings.model_alias,
@@ -290,12 +366,43 @@ def create_app(
                     "finish_reason": "stop",
                 }
             ],
-            "usage": openai_usage(
-                _combine_text(translated.prompt, translated.additional_context), text
-            ),
+            "usage": openai_usage(input_text, text),
         })
 
+    @app.get("/monitor/api/summary")
+    async def monitor_summary(raw_request: Request) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return monitor.sink.summary()
+
+    @app.get("/monitor/api/requests")
+    async def monitor_requests(
+        raw_request: Request, limit: int = 50, session: str | None = None
+    ) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"requests": monitor.sink.requests(limit=limit, session=session)}
+
+    @app.get("/monitor/api/requests/{request_id}")
+    async def monitor_request_detail(raw_request: Request, request_id: str) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        detail = monitor.sink.request_detail(request_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        return detail
+
     return app
+
+
+def _completion_output_text(body: dict) -> str:
+    """Reconstruct the assistant output text (content + tool-call arguments) for
+    token estimation and capture, from a chat.completion body."""
+    message = body.get("choices", [{}])[0].get("message", {})
+    text = message.get("content") or ""
+    for call in message.get("tool_calls") or []:
+        text += call.get("function", {}).get("arguments", "")
+    return text
 
 
 def _redact_translated(translated: TranslatedRequest, settings: Settings) -> TranslatedRequest:
@@ -341,6 +448,17 @@ def _persistent_session(
     return None
 
 
+def _monitor_session_key(
+    raw_request: Request, messages: Sequence[object]
+) -> str | None:
+    """Monitor session identity: prefer an explicit ``x-session-id`` header, else
+    fall back to the conversation key (hash of the first user message)."""
+    header = (raw_request.headers.get(_MONITOR_SESSION_HEADER) or "").strip()
+    if header:
+        return header
+    return _conversation_key(messages)
+
+
 def _conversation_key(messages: Sequence[object]) -> str | None:
     """Stable per-conversation key: hash of the first user message's text."""
     for message in messages:
@@ -361,6 +479,7 @@ async def _chat_resolving_tools(
     session: PersistentSession | None = None,
     max_corrections: int = 1,
     allow_parallel: bool = False,
+    recorder=_NULL_RECORDER,
 ) -> ToolParseOutcome:
     allowed = tool_names(tools)
     parse = parse_model_output_multi if allow_parallel else parse_model_output
@@ -374,15 +493,20 @@ async def _chat_resolving_tools(
     attempt_prompt = prompt
     attempt_context = additional_context
     while True:
+        started = recorder.attempt_timer()
         try:
             text = await client.chat(attempt_prompt, attempt_context, session)
         except SubstrateDisengagedError:
             if used < budget:
                 used += 1
+                recorder.add_attempt(
+                    started, guard=DISENGAGED, retried=True, status=STATUS_GUARD
+                )
                 session = None
                 attempt_prompt = disengaged_retry_prompt(prompt)
                 attempt_context = additional_context
                 continue
+            recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
         outcome = parse(text, allowed)
         if outcome.error is None:
@@ -395,22 +519,41 @@ async def _chat_resolving_tools(
                 if triggered is not None:
                     if used < budget:
                         used += 1
+                        recorder.add_attempt(
+                            started, guard=triggered, retried=True,
+                            status=STATUS_GUARD, text=text,
+                        )
                         attempt_prompt = guard_retry_prompt(triggered)
                         attempt_context = _retry_context(additional_context, prompt, text)
                         continue
                     outcome.guard = triggered
+                    recorder.add_attempt(
+                        started, guard=triggered, status=STATUS_GUARD, text=text
+                    )
+                    return outcome
+            recorder.add_attempt(started, status=STATUS_OK, text=text)
             return outcome
         if used < budget:
             used += 1
+            recorder.add_attempt(
+                started, guard=TOOL_PARSE_FAILURE, retried=True,
+                status=STATUS_GUARD, text=text,
+            )
             strict = budget > 1 and used == budget
             attempt_prompt = correction_prompt(outcome.error, strict=strict)
             attempt_context = _retry_context(additional_context, prompt, text)
             continue
+        recorder.add_attempt(
+            started, guard=TOOL_PARSE_FAILURE, status=STATUS_ERROR, text=text
+        )
         return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 
 
 def _tool_outcome_completion(
-    model_alias: str, outcome: ToolParseOutcome, input_text: str = ""
+    model_alias: str,
+    outcome: ToolParseOutcome,
+    input_text: str = "",
+    completion_id: str | None = None,
 ) -> dict:
     completion_text = outcome.text or ""
     if outcome.tool_calls:
@@ -428,7 +571,7 @@ def _tool_outcome_completion(
         message = {"role": "assistant", "content": outcome.text}
         finish_reason = "stop"
     body = {
-        "id": f"chatcmpl_{uuid.uuid4().hex}",
+        "id": completion_id or f"chatcmpl_{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model_alias,
@@ -465,6 +608,7 @@ async def _openai_stream_with_tools(
     chunk_chars: int = 24,
     chunk_delay_ms: int = 0,
     input_text: str = "",
+    recorder=_NULL_RECORDER,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -491,6 +635,7 @@ async def _openai_stream_with_tools(
             session,
             max_corrections,
             allow_parallel,
+            recorder=recorder,
         )
     )
     try:
@@ -503,6 +648,9 @@ async def _openai_stream_with_tools(
                     yield ": keepalive\n\n"
             outcome = await resolve_task
         except SubstrateCopilotError as exc:
+            recorder.finish(
+                status=STATUS_ERROR, input_text=input_text, error=str(exc)
+            )
             yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
             yield "data: [DONE]\n\n"
             return
@@ -527,6 +675,7 @@ async def _openai_stream_with_tools(
             )
             yield chunk({}, "tool_calls", {"usage": openai_usage(input_text, completion_text)})
         else:
+            completion_text = outcome.text or ""
             if outcome.text:
                 pieces = (
                     [outcome.text]
@@ -541,6 +690,12 @@ async def _openai_stream_with_tools(
             if outcome.guard:
                 extra["x_m365_guard"] = {"guard": outcome.guard, "retries_exhausted": True}
             yield chunk({}, "stop", extra)
+        recorder.finish(
+            status=STATUS_GUARD if outcome.guard else STATUS_OK,
+            guard=outcome.guard,
+            input_text=input_text,
+            output_text=completion_text,
+        )
         yield "data: [DONE]\n\n"
     finally:
         if not resolve_task.done():
@@ -554,10 +709,12 @@ async def _openai_stream(
     additional_context: list[str],
     session: PersistentSession | None = None,
     input_text: str = "",
+    recorder=_NULL_RECORDER,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
+    started = recorder.attempt_timer()
     first_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -578,9 +735,13 @@ async def _openai_stream(
             }
             yield f"data: {json.dumps(chunk)}\n\n"
     except SubstrateCopilotError as exc:
+        recorder.add_attempt(started, status=STATUS_ERROR)
+        recorder.finish(status=STATUS_ERROR, input_text=input_text, error=str(exc))
         yield f"data: {json.dumps({'error': {'message': str(exc), 'type': 'upstream_error'}})}\n\n"
         yield "data: [DONE]\n\n"
         return
+    recorder.add_attempt(started, status=STATUS_OK, text=full_text)
+    recorder.finish(status=STATUS_OK, input_text=input_text, output_text=full_text)
     final_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
