@@ -10,7 +10,7 @@
 6. **工具闭环**：下一轮请求的 `Tool result (...)` 轻量配对回上一条 tool_call 记录，只提取 error 标记与字节数，不存全文；配不上留空。
 7. **面板形态**：纯只读仪表盘（Summary / Requests+详情 attempt 链 / Errors 三视图）；配置只走环境变量，导出用 sqlite3 dump。
 
-术语见仓库 `CONTEXT.md`；技术选型取舍见 `docs/adr/0001-self-hosted-sqlite-monitor.md`。
+术语见仓库 `docs/CONTEXT.md`；技术选型取舍见 `docs/adr/0007-self-hosted-sqlite-monitor.md`。
 
 ## 一、开源方案调研结论
 
