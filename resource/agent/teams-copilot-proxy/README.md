@@ -306,6 +306,7 @@ Example:
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
 | `GET /monitor/api/tools` | Tool-call ranking with closure status and error rate |
 | `GET /monitor/api/tool-efficiency` | Tool-planning reliability & cost grouped by `planning_mode` (`single` vs opt-in `router`); `?since=<unix seconds>` restricts the window (e.g. to exclude stale traffic from an A/B) |
+| `GET /monitor/api/guard-effectiveness` | Per-guard-type retry-recovery stats broken down by tone (hits / recovered / exhausted / recovery rate); `?since=<unix seconds>` restricts the window. Use it to target the worst guard/tone pairs. |
 | `GET /monitor/api/errors` | Guard and substrate error timeline (newest first) |
 | `GET /monitor/api/sessions/{key}` | Per-session totals plus request/tool/event streams |
 
@@ -318,7 +319,8 @@ The proxy ships a self-hosted monitor for diagnosing OpenCode instability (fake 
 What is recorded:
 
 - **Requests:** model, tone, session key, stream flag, estimated token usage, duration, final status (`ok` / `guard` / `error`).
-- **Attempt chain:** every substrate round trip inside one request (original reply → guard trigger → correction retry → final outcome) with per-attempt duration and guard type.
+- **Attempt chain:** every substrate round trip inside one request (original reply → guard trigger → correction retry → final outcome) with per-attempt duration, guard type, the parse/schema `error_detail` that triggered a correction, and (in router mode) the `phase` (`select`/`answer`) the attempt belonged to.
+- **Per-request routing context:** `reasoning_effort` and `planning_mode` are stored on every request so guard/latency regressions can be sliced by effort level and by single-vs-router path.
 - **Tool closure:** tool_calls the model emits are classified (builtin / mcp / skill / task / todowrite / webfetch) and paired with the `Tool result` OpenCode sends on the next turn — only an error flag and byte count, never the result body.
 - **Tool-planning telemetry:** for every request that carries `tools`, the proxy records `planning_mode` (`single` or, when `M365_TOOL_PLANNING_MODE=router`, `router`), whether the round yielded a tool call, how many attempts/corrections it took, and how often the recovery mechanisms fired — shell-fence/bare-command recovery (`shell_recovered`), in-reply de-duplication (`deduped`), and the ledger's repeated-call / repeated-failure flags. This is stored as additive columns and never changes chat behavior.
 - **Stream health:** first-chunk latency, chunk count, average interval, and `[DONE]` completeness as aggregates (no per-chunk rows).

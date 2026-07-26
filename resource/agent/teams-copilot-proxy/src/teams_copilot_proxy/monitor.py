@@ -95,6 +95,10 @@ class AttemptRecord:
     retried: bool = False
     status: str = STATUS_OK
     text: str | None = None
+    # 解析/schema 校验失败的具体原因（短文本），与 capture 档位无关。
+    error_detail: str | None = None
+    # router 模式下的阶段标记：select / answer；single 模式为 None。
+    phase: str | None = None
 
 
 @dataclass
@@ -150,6 +154,7 @@ class RequestRecord:
     # Tool-planning telemetry (baseline for a later router-vs-single comparison).
     had_tools: bool = False
     planning_mode: str = "single"
+    reasoning_effort: str | None = None
     shell_recovered: int = 0
     deduped: int = 0
     repeated_call: bool = False
@@ -176,10 +181,12 @@ class RequestRecorder:
         model: str,
         tone: str,
         stream: bool,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._bus = bus
         self._t0 = time.perf_counter()
         self._seq = 0
+        self._phase: str | None = None
         self.record = RequestRecord(
             id=request_id,
             ts=time.time(),
@@ -187,7 +194,12 @@ class RequestRecorder:
             model=model,
             tone=tone,
             stream=stream,
+            reasoning_effort=reasoning_effort,
         )
+
+    def set_phase(self, phase: str | None) -> None:
+        """标记后续 attempt 所属的 router 阶段（select/answer）。"""
+        self._phase = phase
 
     def attempt_timer(self) -> float:
         return time.perf_counter()
@@ -289,6 +301,7 @@ class RequestRecorder:
         retried: bool = False,
         status: str = STATUS_OK,
         text: str | None = None,
+        error_detail: str | None = None,
     ) -> None:
         try:
             self._seq += 1
@@ -300,6 +313,8 @@ class RequestRecorder:
                     retried=retried,
                     status=status,
                     text=text,
+                    error_detail=_truncate(error_detail, 300),
+                    phase=self._phase,
                 )
             )
         except Exception:  # pragma: no cover - defensive
@@ -354,6 +369,9 @@ class _NullRecorder:
         return 0.0
 
     def add_attempt(self, *args, **kwargs) -> None:
+        return None
+
+    def set_phase(self, phase: str | None) -> None:
         return None
 
     def record_tool_calls(self, calls: list[dict]) -> None:
@@ -424,6 +442,7 @@ class SQLiteSink:
                     stream_complete INTEGER,
                     had_tools INTEGER,
                     planning_mode TEXT,
+                    reasoning_effort TEXT,
                     shell_recovered INTEGER,
                     deduped INTEGER,
                     repeated_call INTEGER,
@@ -468,6 +487,8 @@ class SQLiteSink:
                     retried INTEGER,
                     status TEXT,
                     text TEXT,
+                    error_detail TEXT,
+                    phase TEXT,
                     PRIMARY KEY (request_id, seq)
                 )
                 """
@@ -490,23 +511,32 @@ class SQLiteSink:
     def _migrate_requests(self) -> None:
         """Additive column migration so databases created before the tool-planning
         telemetry gain the new columns without dropping existing rows."""
-        wanted = {
-            "had_tools": "INTEGER",
-            "planning_mode": "TEXT",
-            "shell_recovered": "INTEGER",
-            "deduped": "INTEGER",
-            "repeated_call": "INTEGER",
-            "repeated_failure": "INTEGER",
-        }
+        self._add_missing_columns(
+            "requests",
+            {
+                "had_tools": "INTEGER",
+                "planning_mode": "TEXT",
+                "reasoning_effort": "TEXT",
+                "shell_recovered": "INTEGER",
+                "deduped": "INTEGER",
+                "repeated_call": "INTEGER",
+                "repeated_failure": "INTEGER",
+            },
+        )
+        self._add_missing_columns(
+            "attempts", {"error_detail": "TEXT", "phase": "TEXT"}
+        )
+
+    def _add_missing_columns(self, table: str, wanted: dict[str, str]) -> None:
         existing = {
             row[1]
-            for row in self._conn.execute("PRAGMA table_info(requests)").fetchall()
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
         with self._conn:
             for column, col_type in wanted.items():
                 if column not in existing:
                     self._conn.execute(
-                        f"ALTER TABLE requests ADD COLUMN {column} {col_type}"
+                        f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
                     )
 
     def write(self, rec: RequestRecord) -> None:
@@ -518,9 +548,9 @@ class SQLiteSink:
                     prompt_tokens, completion_tokens, total_tokens, duration_ms,
                     error, error_type, prompt_summary, reply_snippet,
                     first_chunk_ms, chunk_count, avg_chunk_interval_ms,
-                    stream_complete, had_tools, planning_mode, shell_recovered,
-                    deduped, repeated_call, repeated_failure
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    stream_complete, had_tools, planning_mode, reasoning_effort,
+                    shell_recovered, deduped, repeated_call, repeated_failure
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     rec.id,
@@ -545,6 +575,7 @@ class SQLiteSink:
                     (1 if rec.stream_stats.complete else 0) if rec.stream else None,
                     1 if rec.had_tools else 0,
                     rec.planning_mode,
+                    rec.reasoning_effort,
                     rec.shell_recovered,
                     rec.deduped,
                     1 if rec.repeated_call else 0,
@@ -576,10 +607,15 @@ class SQLiteSink:
                 self._conn.execute(
                     """
                     INSERT OR REPLACE INTO attempts (
-                        request_id, seq, duration_ms, guard, retried, status, text
-                    ) VALUES (?,?,?,?,?,?,?)
+                        request_id, seq, duration_ms, guard, retried, status,
+                        text, error_detail, phase
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
                     """,
-                    (rec.id, a.seq, a.duration_ms, a.guard, 1 if a.retried else 0, a.status, a.text),
+                    (
+                        rec.id, a.seq, a.duration_ms, a.guard,
+                        1 if a.retried else 0, a.status, a.text,
+                        a.error_detail, a.phase,
+                    ),
                 )
         self._writes += 1
         if self._writes % 50 == 0:
@@ -815,6 +851,44 @@ class SQLiteSink:
         finally:
             conn.close()
 
+    def guard_effectiveness(self, since: float | None = None) -> list[dict]:
+        """Per-guard-type recovery stats: how often each guard fired and whether
+        the correction retry actually recovered the request (final status == ok).
+        Broken down by tone so proxy tuning can target the worst guard/tone
+        pairs. ``since`` (unix seconds) restricts the window.
+        """
+        cutoff = since if since is not None else 0.0
+        conn = self._readonly_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    a.guard AS guard,
+                    COALESCE(r.tone, '') AS tone,
+                    COUNT(*) AS hits,
+                    SUM(CASE WHEN r.status = 'ok' THEN 1 ELSE 0 END) AS recovered,
+                    SUM(CASE WHEN r.status = 'guard' THEN 1 ELSE 0 END)
+                        AS exhausted
+                FROM attempts a
+                JOIN requests r ON r.id = a.request_id
+                WHERE a.guard IS NOT NULL AND r.ts >= ?
+                GROUP BY a.guard, r.tone
+                ORDER BY hits DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+            out = []
+            for row in rows:
+                data = dict(row)
+                hits = data["hits"] or 0
+                data["recovery_rate"] = (
+                    data["recovered"] / hits if hits else 0.0
+                )
+                out.append(data)
+            return out
+        finally:
+            conn.close()
+
     def errors(self, limit: int = 100) -> list[dict]:
         """守卫与 substrate 错误事件时间线（时间倒序）。"""
         conn = self._readonly_conn()
@@ -900,7 +974,8 @@ class SQLiteSink:
             detail["attempts"] = [
                 dict(a)
                 for a in conn.execute(
-                    "SELECT seq, duration_ms, guard, retried, status, text "
+                    "SELECT seq, duration_ms, guard, retried, status, text, "
+                    "error_detail, phase "
                     "FROM attempts WHERE request_id = ? ORDER BY seq",
                     (request_id,),
                 ).fetchall()

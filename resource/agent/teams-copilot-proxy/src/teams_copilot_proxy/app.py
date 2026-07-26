@@ -242,6 +242,7 @@ def create_app(
         if monitor is None:
             return _NULL_RECORDER, f"chatcmpl_{uuid.uuid4().hex}"
         request_id = f"chatcmpl_{uuid.uuid4().hex}"
+        effort = (request.reasoning_effort or "").strip().lower() or None
         recorder = RequestRecorder(
             monitor,
             request_id=request_id,
@@ -249,6 +250,7 @@ def create_app(
             model=request.model,
             tone=tone,
             stream=bool(request.stream),
+            reasoning_effort=effort,
         )
         return recorder, request_id
 
@@ -554,6 +556,14 @@ def create_app(
         monitor.flush()
         return {"modes": monitor.sink.tool_efficiency(since)}
 
+    @app.get("/monitor/api/guard-effectiveness")
+    async def monitor_guard_effectiveness(
+        raw_request: Request, since: float | None = None
+    ) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"guards": monitor.sink.guard_effectiveness(since)}
+
     @app.get("/monitor/api/errors")
     async def monitor_errors(raw_request: Request, limit: int = 100) -> dict:
         monitor = require_monitor(raw_request)
@@ -828,7 +838,9 @@ async def _chat_resolving_tools(
                     call.name, call.arguments, schemas
                 )
                 if schema_error is not None:
-                    outcome = ToolParseOutcome(text=text.strip(), error=schema_error)
+                    outcome = ToolParseOutcome(
+                        text=text.strip(), error=schema_error
+                    )
                     break
         if outcome.error is None:
             if outcome.tool_call is None and outcome.text:
@@ -860,14 +872,15 @@ async def _chat_resolving_tools(
             used += 1
             recorder.add_attempt(
                 started, guard=TOOL_PARSE_FAILURE, retried=True,
-                status=STATUS_GUARD, text=text,
+                status=STATUS_GUARD, text=text, error_detail=outcome.error,
             )
             strict = budget > 1 and used == budget
             attempt_prompt = correction_prompt(outcome.error, strict=strict)
             attempt_context = _retry_context(additional_context, prompt, text)
             continue
         recorder.add_attempt(
-            started, guard=TOOL_PARSE_FAILURE, status=STATUS_ERROR, text=text
+            started, guard=TOOL_PARSE_FAILURE, status=STATUS_ERROR, text=text,
+            error_detail=outcome.error,
         )
         return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 
@@ -895,6 +908,7 @@ async def _route_resolving_tools(
     substrate round trip for the router-vs-single A/B.
     """
     select_context = additional_context + [_ROUTER_SELECT_RULES]
+    recorder.set_phase("select")
     outcome = await _chat_resolving_tools(
         client,
         prompt,
@@ -907,18 +921,23 @@ async def _route_resolving_tools(
         planning_mode="single",
     )
     if outcome.tool_calls or outcome.guard is not None:
+        recorder.set_phase(None)
         return outcome
     if not _is_no_tool_signal(outcome.text):
         # The selection turn produced neither a tool call nor the sentinel; treat
         # the reply as the answer rather than burning another round trip.
+        recorder.set_phase(None)
         return outcome
+    recorder.set_phase("answer")
     started = recorder.attempt_timer()
     try:
         text = await client.chat(prompt, additional_context, session)
     except SubstrateDisengagedError:
         recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
+        recorder.set_phase(None)
         return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
     recorder.add_attempt(started, status=STATUS_OK, text=text)
+    recorder.set_phase(None)
     return ToolParseOutcome(text=text.strip())
 
 

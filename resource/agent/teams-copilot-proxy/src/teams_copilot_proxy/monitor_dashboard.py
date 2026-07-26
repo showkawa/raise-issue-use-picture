@@ -100,8 +100,8 @@ async function copyToken() {
 function card(k, v) { return `<div class="card"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`; }
 
 async function renderSummary() {
-  const [s, tools, eff] = await Promise.all([
-    api('summary'), api('tools'), api('tool-efficiency')
+  const [s, tools, eff, ge] = await Promise.all([
+    api('summary'), api('tools'), api('tool-efficiency'), api('guard-effectiveness')
   ]);
   let html = '<div class="cards">'
     + card('requests', s.requests)
@@ -128,6 +128,18 @@ async function renderSummary() {
   } else {
     html += '<p class="muted">no tool-bearing requests yet</p>';
   }
+  html += '<h2>Guard effectiveness (retry recovery by guard / tone)</h2>';
+  if (ge.guards.length) {
+    html += '<table><tr><th>guard</th><th>tone</th><th>hits</th>'
+      + '<th>recovered</th><th>exhausted</th><th>recovery rate</th></tr>'
+      + ge.guards.map(g => `<tr><td>${esc(g.guard)}</td><td>${esc(g.tone)}</td>`
+        + `<td>${g.hits}</td><td class="ok">${g.recovered}</td>`
+        + `<td class="guard">${g.exhausted}</td>`
+        + `<td>${(g.recovery_rate * 100).toFixed(1)}%</td></tr>`).join('')
+      + '</table>';
+  } else {
+    html += '<p class="muted">no guard hits yet</p>';
+  }
   html += '<h2>Tones</h2><table><tr><th>tone</th><th>requests</th></tr>'
     + s.tones.map(t => `<tr><td>${esc(t.tone)}</td><td>${t.count}</td></tr>`).join('')
     + '</table>';
@@ -139,10 +151,11 @@ async function renderSummary() {
 
 async function renderRequests() {
   const data = await api('requests?limit=100');
-  let html = '<table><tr><th>time</th><th>id</th><th>session</th><th>model</th><th>tone</th><th>stream</th><th>status</th><th>guard</th><th>tokens</th><th>ms</th></tr>'
+  let html = '<table><tr><th>time</th><th>id</th><th>session</th><th>model</th><th>tone</th><th>effort</th><th>mode</th><th>stream</th><th>status</th><th>guard</th><th>tokens</th><th>ms</th></tr>'
     + data.requests.map(r =>
       `<tr class="req" data-id="${esc(r.id)}"><td>${fmtTs(r.ts)}</td><td>${esc(r.id.slice(0, 18))}…</td>`
       + `<td>${esc(r.session_key || '')}</td><td>${esc(r.model)}</td><td>${esc(r.tone)}</td>`
+      + `<td>${esc(r.reasoning_effort || '')}</td><td>${esc(r.planning_mode || '')}</td>`
       + `<td>${r.stream ? 'yes' : ''}</td><td class="${esc(r.status)}">${esc(r.status)}</td>`
       + `<td>${esc(r.guard || '')}</td><td>${r.total_tokens}</td><td>${r.duration_ms}</td></tr>`
     ).join('') + '</table><div id="detail"></div>';
@@ -158,10 +171,11 @@ async function showDetail(id) {
     + `${d.error ? '<pre>' + esc(d.error) + '</pre>' : ''}`;
   if (d.prompt_summary) html += '<h2>Prompt excerpt</h2><pre>' + esc(d.prompt_summary) + '</pre>';
   if (d.reply_snippet) html += '<h2>Reply excerpt</h2><pre>' + esc(d.reply_snippet) + '</pre>';
-  html += '<h2>Attempt chain</h2><table><tr><th>#</th><th>ms</th><th>guard</th><th>retried</th><th>status</th><th>text</th></tr>'
+  html += '<h2>Attempt chain</h2><table><tr><th>#</th><th>ms</th><th>phase</th><th>guard</th><th>retried</th><th>status</th><th>why</th><th>text</th></tr>'
     + d.attempts.map(a =>
-      `<tr><td>${a.seq}</td><td>${a.duration_ms}</td><td>${esc(a.guard || '')}</td>`
+      `<tr><td>${a.seq}</td><td>${a.duration_ms}</td><td>${esc(a.phase || '')}</td><td>${esc(a.guard || '')}</td>`
       + `<td>${a.retried ? 'yes' : ''}</td><td class="${esc(a.status)}">${esc(a.status)}</td>`
+      + `<td>${a.error_detail ? esc(a.error_detail) : ''}</td>`
       + `<td>${a.text ? '<pre>' + esc(a.text) + '</pre>' : '<span class="muted">not captured</span>'}</td></tr>`
     ).join('') + '</table>';
   box.innerHTML = html;

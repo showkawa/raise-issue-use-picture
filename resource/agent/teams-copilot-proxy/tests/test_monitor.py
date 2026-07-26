@@ -625,6 +625,49 @@ def test_repeated_failure_flag_recorded(tmp_path) -> None:
     assert entry["repeated_failure"] == 1
 
 
+def test_tool_efficiency_since_filters_stale_rows(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    assert len(_efficiency(client)) == 1
+    future = time.time() + 3600
+    filtered = client.get(
+        f"/monitor/api/tool-efficiency?since={future}", headers=AUTH
+    ).json()["modes"]
+    assert filtered == []
+
+
+def test_guard_effectiveness_reports_recovery_by_guard(tmp_path) -> None:
+    # First attempt is bad JSON (guard), retry succeeds -> recovered.
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    guards = client.get(
+        "/monitor/api/guard-effectiveness", headers=AUTH
+    ).json()["guards"]
+    row = next(g for g in guards if g["guard"] == TOOL_PARSE_FAILURE)
+    assert row["hits"] == 1
+    assert row["recovered"] == 1
+    assert row["recovery_rate"] == 1.0
+    assert row["tone"] == "Claude_Sonnet"
+
+
+def test_attempt_records_error_detail_for_parse_failure(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    req_id = client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    detail = client.get(f"/monitor/api/requests/{req_id}", headers=AUTH).json()
+    first = detail["attempts"][0]
+    assert first["guard"] == TOOL_PARSE_FAILURE
+    assert first["error_detail"]
+
+
 def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
     import sqlite3
 
@@ -646,11 +689,19 @@ def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
         assert {
             "had_tools",
             "planning_mode",
+            "reasoning_effort",
             "shell_recovered",
             "deduped",
             "repeated_call",
             "repeated_failure",
         } <= columns
+        attempt_columns = {
+            row[1]
+            for row in sink._conn.execute(
+                "PRAGMA table_info(attempts)"
+            ).fetchall()
+        }
+        assert {"error_detail", "phase"} <= attempt_columns
     finally:
         sink.close()
 
