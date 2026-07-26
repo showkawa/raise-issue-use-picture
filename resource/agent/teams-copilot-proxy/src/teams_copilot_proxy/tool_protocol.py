@@ -19,7 +19,21 @@ _ANY_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+# An opening tool_call fence that is never closed: the hallmark of an upstream
+# reply cut off mid-argument (typically a large file inlined into write/apply_patch).
+_TOOL_CALL_FENCE_OPEN_RE = re.compile(
+    r"```tool_call[ \t]*\r?\n(?P<body>.*)\Z",
+    re.DOTALL,
+)
+
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
+
+TRUNCATED_ERROR_PREFIX = "tool_call block appears truncated"
+
+
+def is_truncated_tool_call_error(error: str | None) -> bool:
+    return bool(error) and error.startswith(TRUNCATED_ERROR_PREFIX)  # type: ignore[union-attr]
+
 
 # Shell code fences the model sometimes emits instead of a tool_call block, e.g.
 # ```bash\nls -la\n```. When a matching shell-type tool is actually available we
@@ -284,6 +298,9 @@ def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
         shell = _try_shell_fallback(cleaned, allowed_names)
         if shell is not None:
             return shell
+        truncated = _try_truncated_tool_call(cleaned)
+        if truncated is not None:
+            return truncated
         return ToolParseOutcome(text=cleaned.strip())
 
     body = match.group("body").strip()
@@ -323,6 +340,38 @@ def parse_model_output_multi(text: str, allowed_names: set[str]) -> ToolParseOut
             return outcome
         calls.extend(outcome.tool_calls)
     return ToolParseOutcome(text=leading, tool_calls=calls)
+
+
+def _try_truncated_tool_call(cleaned: str) -> ToolParseOutcome | None:
+    """Recognise a tool call the upstream cut off before it could be closed.
+
+    Fires only when an opening ``tool_call`` fence (or a bare JSON envelope
+    naming a tool) is followed by JSON that neither parses nor terminates, which
+    happens when the model inlines a whole file into one argument and the reply
+    hits the upstream output limit. Reported as its own error so the retry can
+    tell the model to split the write instead of resending the same payload.
+    """
+    match = _TOOL_CALL_FENCE_OPEN_RE.search(cleaned)
+    if match is not None:
+        body = match.group("body").strip()
+    else:
+        body = cleaned.strip()
+        if not body.startswith("{") or '"name"' not in body:
+            return None
+    if not body.startswith("{"):
+        return None
+    try:
+        json.loads(body)
+    except json.JSONDecodeError as exc:
+        return ToolParseOutcome(
+            text=cleaned.strip(),
+            error=(
+                f"{TRUNCATED_ERROR_PREFIX}: the reply ended mid-JSON "
+                f"({exc.msg} at line {exc.lineno} column {exc.colno}), so the "
+                "arguments were cut off by the output length limit"
+            ),
+        )
+    return None
 
 
 def _try_fenced_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome | None:
@@ -477,6 +526,23 @@ def dedupe_tool_calls(calls: list[ParsedToolCall]) -> list[ParsedToolCall]:
         seen.add(key)
         out.append(call)
     return out
+
+
+def truncation_retry_prompt(error: str) -> str:
+    """Targeted retry for a tool call cut off by the upstream output limit.
+
+    Never asks for the same payload again: the only way through is a smaller
+    call, so the model is told to write incrementally instead.
+    """
+    return (
+        f"Your tool call was cut off before it finished ({error}). The content you "
+        "inlined was too long for a single reply, so nothing ran. Do NOT resend the "
+        "same call. Instead emit ONLY one fenced tool_call block that stays well "
+        "under the limit: write a much smaller portion of the file now (for example "
+        "the first section only, or a concise version), and plan to append or edit "
+        "the remainder in later turns. Keep the arguments compact and make sure the "
+        "JSON object and the closing fence are complete."
+    )
 
 
 def correction_prompt(error: str, *, strict: bool = False) -> str:

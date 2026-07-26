@@ -24,6 +24,7 @@ from .guards import (
     DISENGAGED_SENTINEL,
     HALLUCINATED_COMPLETION,
     HOSTED_FILE_LINK,
+    TOOL_OUTPUT_TRUNCATED,
     TOOL_PARSE_FAILURE,
     detect_confabulation,
     detect_hallucinated_completion,
@@ -60,10 +61,12 @@ from .tool_protocol import (
     ToolParseOutcome,
     correction_prompt,
     dedupe_tool_calls,
+    is_truncated_tool_call_error,
     parse_model_output,
     parse_model_output_multi,
     tool_names,
     tool_schemas,
+    truncation_retry_prompt,
     validate_tool_arguments,
 )
 from .translator import (
@@ -806,8 +809,15 @@ async def _chat_resolving_tools(
     tools_have_run = "Tool result (" in prompt or any(
         "Tool result (" in ctx for ctx in additional_context
     )
+    # Each failure mode gets its own allowance: a redirect (e.g. the model answered
+    # with a hosted download link) must not consume the retry a later truncated or
+    # malformed tool call needs, which is what turned a recoverable /init turn into
+    # a hard failure when the budget was shared.
     budget = max(0, min(max_corrections, 2))
-    used = 0
+    used_parse = 0
+    used_truncated = 0
+    used_redirect = 0
+    used_disengaged = 0
     attempt_prompt = prompt
     attempt_context = additional_context
     while True:
@@ -815,8 +825,8 @@ async def _chat_resolving_tools(
         try:
             text = await client.chat(attempt_prompt, attempt_context, session)
         except SubstrateDisengagedError:
-            if used < budget:
-                used += 1
+            if used_disengaged < budget:
+                used_disengaged += 1
                 recorder.add_attempt(
                     started, guard=DISENGAGED, retried=True, status=STATUS_GUARD
                 )
@@ -852,8 +862,8 @@ async def _chat_resolving_tools(
                 elif not tools_have_run and detect_hallucinated_completion(outcome.text):
                     triggered = HALLUCINATED_COMPLETION
                 if triggered is not None:
-                    if used < budget:
-                        used += 1
+                    if used_redirect < budget:
+                        used_redirect += 1
                         recorder.add_attempt(
                             started, guard=triggered, retried=True,
                             status=STATUS_GUARD, text=text,
@@ -868,21 +878,28 @@ async def _chat_resolving_tools(
                     return outcome
             recorder.add_attempt(started, status=STATUS_OK, text=text)
             return outcome
-        if used < budget:
-            used += 1
+        truncated = is_truncated_tool_call_error(outcome.error)
+        guard_kind = TOOL_OUTPUT_TRUNCATED if truncated else TOOL_PARSE_FAILURE
+        used_kind = used_truncated if truncated else used_parse
+        if used_kind < budget:
+            if truncated:
+                used_truncated += 1
+                attempt_prompt = truncation_retry_prompt(outcome.error)
+            else:
+                used_parse += 1
+                strict = budget > 1 and used_parse == budget
+                attempt_prompt = correction_prompt(outcome.error, strict=strict)
             recorder.add_attempt(
-                started, guard=TOOL_PARSE_FAILURE, retried=True,
+                started, guard=guard_kind, retried=True,
                 status=STATUS_GUARD, text=text, error_detail=outcome.error,
             )
-            strict = budget > 1 and used == budget
-            attempt_prompt = correction_prompt(outcome.error, strict=strict)
             attempt_context = _retry_context(additional_context, prompt, text)
             continue
         recorder.add_attempt(
-            started, guard=TOOL_PARSE_FAILURE, status=STATUS_ERROR, text=text,
+            started, guard=guard_kind, status=STATUS_ERROR, text=text,
             error_detail=outcome.error,
         )
-        return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
+        return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=guard_kind)
 
 
 async def _route_resolving_tools(

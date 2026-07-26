@@ -1319,6 +1319,82 @@ def test_hosted_file_link_guard_retries_with_targeted_prompt() -> None:
     assert "hosted/server-side file link" in fake.calls[1][0]
 
 
+def test_truncated_tool_call_retries_with_split_write_prompt() -> None:
+    truncated = (
+        '```tool_call\n{"name": "read_file", "arguments": {"path": "docs/AGENTS'
+    )
+    fake = ToolCallingCopilotClient(
+        [
+            truncated,
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Write AGENTS.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(fake.calls) == 2
+    retry_prompt = fake.calls[1][0]
+    assert "cut off" in retry_prompt
+    assert "Do NOT resend the same call" in retry_prompt
+
+
+def test_redirect_guard_retry_does_not_consume_parse_failure_budget() -> None:
+    """A hosted-link redirect and a later truncated call each get their own retry."""
+    fake = ToolCallingCopilotClient(
+        [
+            (
+                "Created [`AGENTS.md`](https://jp-prod.asyncgw.teams.microsoft.com"
+                "/v1/objects/0-ea-d2-abc/views/original/AGENTS.md)."
+            ),
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "docs/AGE',
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Create AGENTS.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(fake.calls) == 3
+    assert "hosted/server-side file link" in fake.calls[1][0]
+    assert "cut off" in fake.calls[2][0]
+
+
+def test_exhausted_truncation_budget_reports_truncated_guard() -> None:
+    truncated = '```tool_call\n{"name": "read_file", "arguments": {"path": "AGE'
+    fake = ToolCallingCopilotClient([truncated, truncated])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Write AGENTS.md"}],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["x_m365_guard"]["guard"] == "tool_output_truncated"
+    assert body["choices"][0]["message"]["content"] == TOOL_FAILURE_SENTINEL
+
+
 def test_substrate_client_retries_throttled_turn_before_first_chunk() -> None:
     token = make_jwt(int(time.time()) + 3600)
     substrate = SubstrateCopilotClient(token, throttle_retries=2)

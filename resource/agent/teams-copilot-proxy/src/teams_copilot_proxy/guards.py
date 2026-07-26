@@ -7,6 +7,12 @@ HOSTED_FILE_LINK = "hosted_file_link"
 HALLUCINATED_COMPLETION = "hallucinated_completion"
 DISENGAGED = "disengaged"
 TOOL_PARSE_FAILURE = "tool_parse_failure"
+TOOL_OUTPUT_TRUNCATED = "tool_output_truncated"
+
+# Guards that mean "the model answered instead of calling a tool" and are fixed by
+# redirecting it back to the tool protocol. They get their own retry budget so a
+# redirect never consumes the allowance a later parse/truncation failure needs.
+REDIRECT_GUARDS = (CONFABULATION, HOSTED_FILE_LINK, HALLUCINATED_COMPLETION)
 
 DISENGAGED_SENTINEL = (
     "[teams-copilot-proxy] Copilot's safety filter disengaged from this request after "
