@@ -36,7 +36,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Supports persistent Copilot sessions across turns
 - Emulated tool calling on `/v1/chat/completions`, so OpenCode can read files, run commands, and edit code
 - Image/vision input: OpenCode image attachments are uploaded to the substrate and described by the model (GPT-5 / reasoning tones)
-- Maps OpenAI model names to Copilot tones (`claude*` -> `Claude_Sonnet`, `gpt*` -> `Gpt_5_5_Chat`, `magic*` -> `Magic`); unknown names use the default tone
+- Maps OpenAI model ids to Copilot tones: an exact tone id (e.g. `gpt-5-6-reasoning`, `gpt-5-5-chat`, `claude-sonnet`) routes to that tone; otherwise the `claude*`/`gpt*`/`magic*` prefix picks `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses the default tone
 - Startup capability probe: tests candidate tones and a fenced tool probe, tiers the deployment T1 (Claude + reliable tools) or T3 (best-effort tools), cached for 24h and reported on `/healthz`
 - Guard layer for tool turns: detects confabulation ("I can't access your files"), hallucinated completion, safety-filter disengagement, and upstream throttling; shares a per-request retry budget and reports honestly via an `x_m365_guard` field instead of faking tool success
 - Streaming with tools: immediate HTTP 200, `: keepalive` comments while Copilot thinks, then typewriter-style chunked delivery of plain-text answers (tool calls stay atomic)
@@ -78,7 +78,7 @@ Proxy connection settings:
 | Base URL | `http://127.0.0.1:8000/v1` |
 | API Key | `unused` |
 
-The model id selects the Copilot tone: ids starting with `claude`/`gpt`/`magic` map to `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses `M365_DEFAULT_TONE` (or the tone chosen by the startup probe).
+The model id selects the Copilot tone: an exact tone id (e.g. `claude-sonnet`, `gpt-5-5-chat`, `gpt-5-5-reasoning`, `gpt-5-6-reasoning`) routes to that tone; otherwise ids starting with `claude`/`gpt`/`magic` map to `Claude_Sonnet`/`Gpt_5_5_Chat`/`Magic`; anything else uses `M365_DEFAULT_TONE` (or the tone chosen by the startup probe).
 
 Recommended: drop a project-level `opencode.json` in your repo root. It declares the proxy as a custom provider with `tool_call: true`, which is **required** â€” without it OpenCode will not send tool definitions and the agent loop cannot run:
 
@@ -120,7 +120,7 @@ The full multi-model config (Claude Sonnet plus GPT-5 chat/reasoning tones, with
 
 For persistent Copilot-side conversation memory, use a `:persist` model id (e.g. `claude-sonnet:persist`).
 
-**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. By default one tool call per turn; malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Parallel tool calls (several `tool_call` blocks in one reply, emitted as multiple OpenAI `tool_calls`) are available as an opt-in via `M365_ALLOW_PARALLEL_TOOL_CALLS=true`.
+**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. Malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. Parallel tool calls (several `tool_call` blocks in one reply, emitted as multiple OpenAI `tool_calls`) are enabled per tone via `M365_PARALLEL_TOOL_TONES` (default `Claude_Sonnet`, the tone that reliably emits them) and can be forced on for every tone with `M365_ALLOW_PARALLEL_TOOL_CALLS=true`; the GPT-5.x reasoning tones keep the single-tool-per-turn path by default because they tend to refuse or disengage when asked for several at once.
 
 **Reasoning tones (GPT-5.x Reasoning):** [examples/opencode.json](examples/opencode.json) defaults the coding model to `gpt-5-6-reasoning` (with `gpt-5-5-chat` as `small_model` for titles/summaries). Reasoning tones tend to think in prose before acting and sometimes wrap the tool JSON in a mislabelled ```json (or unlabelled) fence, or refuse by claiming the repository is "not accessible in the workspace". Two mechanisms make them reliable for OpenCode's tool loop: (1) the parser recovers a tool call from a single mislabelled fence when no ```tool_call fence is present, tolerating leading reasoning text; (2) the confabulation guard detects sandbox / "/mnt/data" / "can't locate the repository" / "make the repository available" style refusals and re-asks for a tool call. Local reliability probes on `Gpt_5_6_Reasoning` hit tool calls on `/init` repo scans, single-file reads, and symbol greps, and drive multi-turn read/list loops without sandbox refusals.
 
@@ -135,6 +135,10 @@ For persistent Copilot-side conversation memory, use a `:persist` model id (e.g.
 **Shell-fence recovery:** reasoning tones sometimes emit a shell command as a ` ```bash ` / `sh` / `shell` / `powershell` / `cmd` code fence (or a bare `{"command": ...}` object) instead of the `tool_call` envelope. When a shell-type tool (`bash`/`sh`/…) is actually in the tool set, the proxy recovers such a block as a real call for that tool rather than leaking it to OpenCode as prose. It is deliberately conservative — it only fires for a single unambiguous block and only when a matching shell tool exists — so ordinary illustrative snippets are never turned into executions.
 
 **In-reply de-duplication:** within a single (parallel) reply, byte-identical tool calls (same name + canonical arguments) are collapsed to one, so the client is never asked to run the exact same operation twice; at least one call is always kept.
+
+**Web-search tool de-duplication:** Copilot already grounds answers with Bing web results, so a client-provided web-search tool (`web_search` / `websearch` / `search_web` / `bing_web_search`) usually just triggers redundant turns. By default (`M365_DEDUP_WEBSEARCH`) such tools are stripped from the tool list before the request is sent; set it to `false` to keep them.
+
+**Structured output (JSON mode):** when the request sets `response_format` to `{"type": "json_object"}` or `{"type": "json_schema", ...}`, the proxy appends an instruction asking Copilot to reply with a single valid JSON object (and, for `json_schema`, to match the supplied schema). The substrate has no native JSON mode, so this is prompt-enforced rather than guaranteed.
 
 When `tools` is present and `stream: true`, the proxy replies with HTTP 200 immediately, emits the assistant role chunk, sends `: keepalive` SSE comments (every `M365_STREAM_KEEPALIVE_INTERVAL_S` seconds) while the full reply is buffered and parsed, then delivers plain-text answers as typewriter-style chunks of `M365_STREAM_CHUNK_CHARS` characters. Tool calls are always sent as a single atomic chunk. If a guard fired and retries were exhausted, the final chunk carries an `x_m365_guard` field.
 
@@ -327,7 +331,10 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_REDACT_OUTBOUND` | `true` | Optional. When on, scrubs secret-like strings (tokens, API keys, private keys, `KEY=value` env secrets) from everything sent upstream to Copilot, replacing them with `[REDACTED]`. Only affects outbound content, not the client response. |
 | `M365_SANITIZE_SYSTEM_PROMPT_WITH_TOOLS` | `true` | Optional. When on, neutralizes OpenCode's competing-identity assertions and merges the rest of the system prompt into tool-turn requests, so the Copilot channel keeps the engineering guidance while still emitting tool calls. Requests without tools are unaffected. |
 | `M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS` | `false` | Optional. When on, drops the OpenCode system prompt entirely on requests that carry `tools`. Superseded by the sanitize-merge behavior above; leave off unless you specifically want the old drop-everything behavior. |
-| `M365_ALLOW_PARALLEL_TOOL_CALLS` | `false` | Optional. When on, the tool protocol permits several `tool_call` blocks in one reply and the proxy emits them all as OpenAI `tool_calls`. Default off keeps the single-tool-per-turn path, which is the most reliable on the Claude tone. |
+| `M365_ALLOW_PARALLEL_TOOL_CALLS` | `false` | Optional. When on, allows several `tool_call` blocks in one reply (emitted as multiple OpenAI `tool_calls`) for **every** tone. Leave off to fall back to the per-tone `M365_PARALLEL_TOOL_TONES` allowlist. |
+| `M365_PARALLEL_TOOL_TONES` | `Claude_Sonnet` | Optional. Comma-separated tones allowed to emit parallel tool calls even when `M365_ALLOW_PARALLEL_TOOL_CALLS` is off. Default enables it only for `Claude_Sonnet`, which reliably emits several at once; the GPT-5.x reasoning tones stay single-tool-per-turn. |
+| `M365_DEDUP_WEBSEARCH` | `true` | Optional. When on, strips client-provided web-search tools (`web_search`/`websearch`/`search_web`/`bing_web_search`) from the tool list, since Copilot already grounds answers with Bing results. Set to `false` to keep them. |
+| `M365_CONTEXT_LIMIT` | `265000` | Optional. Hard token ceiling; requests estimated to exceed M365 Copilot's ~265k single-conversation cap are rejected before hitting the substrate. |
 | `M365_MONITOR_ENABLED` | `true` | Optional. Turns the built-in monitor on/off. When off, `/monitor` endpoints return 404 and nothing is recorded. |
 | `M365_MONITOR_DB_PATH` | `monitor.db` | Optional. SQLite file for monitor data (WAL mode, single file plus `-wal`/`-shm`). |
 | `M365_MONITOR_CAPTURE` | `failures` | Optional. Content capture policy: `off` (metadata only), `failures` (excerpts only for failed/guard-triggered requests), `all`. |
@@ -353,7 +360,7 @@ Most users only need `.env` after the proxy captures a token.
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
 - Token refresh depends on a signed-in Chrome profile.
 - Built for OpenCode 1.18.4 only; other clients (Codex, Claude Code) are not supported.
-- Tool calls are emulated via prompting on `/v1/chat/completions` (single tool per turn by default, or several with `M365_ALLOW_PARALLEL_TOOL_CALLS`; with tools the body is buffered upstream, then streamed to the client as typewriter chunks).
+- Tool calls are emulated via prompting on `/v1/chat/completions` (parallel calls per-tone via `M365_PARALLEL_TOOL_TONES`, default `Claude_Sonnet`, or forced on for all tones with `M365_ALLOW_PARALLEL_TOOL_CALLS`; the reasoning tones stay single-tool-per-turn; with tools the body is buffered upstream, then streamed to the client as typewriter chunks).
 - Sampling params (`temperature`/`top_p`) are forwarded best-effort but the substrate chat channel may ignore them; `top_k`/`max_tokens` have no substrate equivalent, and `reasoning_effort` is emulated by tone routing (no true per-request effort control).
 - Guard detection is heuristic; on T3 tiers (no Claude tone) tool calling is best-effort and unreliable.
 - Token usage numbers are local estimates (~4 chars/token), not real counts; they only need to be roughly proportional to drive OpenCode's context tracking against the ~265k conversation cap.

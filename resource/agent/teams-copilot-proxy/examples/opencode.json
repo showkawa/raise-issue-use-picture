@@ -70,7 +70,7 @@
             "context": 265000,
             "output": 8192
           }
-        },        
+        },
         "gpt-5-5-reasoning:persist": {
           "name": "Copilot (GPT-5.5 Reasoning, persist)",
           "tool_call": true,
@@ -80,7 +80,7 @@
             "context": 265000,
             "output": 8192
           }
-        },        
+        },
         "gpt-5-6-reasoning:persist": {
           "name": "Copilot (GPT-5.6 Reasoning, persist)",
           "tool_call": true,
