@@ -208,7 +208,7 @@ async function showDetail(id) {
     + `<td>${pct(d.context_pct)}</td><td>${d.tools_count ?? ''}</td>`
     + `<td>${esc(d.tool_kinds || '')}</td><td>${esc(d.tools_fingerprint || '')}</td>`
     + `<td>${d.temperature ?? ''}</td><td>${d.top_p ?? ''}</td><td>${d.max_tokens ?? ''}</td>`
-    + `<td>${esc(d.response_format || '')}</td><td>${esc(d.injections || '')}</td></tr></table>';
+    + `<td>${esc(d.response_format || '')}</td><td>${esc(d.injections || '')}</td></tr></table>`;
   if (d.prompt_summary) html += '<h2>Prompt excerpt</h2><pre>' + esc(d.prompt_summary) + '</pre>';
   if (d.reply_snippet) html += '<h2>Reply excerpt</h2><pre>' + esc(d.reply_snippet) + '</pre>';
   html += '<h2>Attempt chain</h2><table><tr><th>#</th><th>ms</th><th>phase</th><th>guard</th><th>retried</th><th>status</th><th>why</th><th>text</th></tr>'
