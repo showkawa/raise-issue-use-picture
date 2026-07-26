@@ -3,6 +3,13 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .oauth_pkce import (
+    DEFAULT_AUTHORITY,
+    DEFAULT_CLIENT_ID,
+    DEFAULT_REDIRECT_URI,
+    DEFAULT_SCOPE,
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -59,4 +66,14 @@ class Settings(BaseSettings):
     monitor_retention_days: int = Field(default=30, alias="M365_MONITOR_RETENTION_DAYS")
     # /monitor 查询与面板复用的 Bearer token；未单独配置时回退到 access_token。
     monitor_token: str = Field(default="", alias="M365_MONITOR_TOKEN")
+
+    # --- PKCE OAuth token 获取（ADR-0008，opt-in）---
+    # 通过标准 Microsoft identity platform OAuth 2.0 + PKCE 拿 refresh_token，
+    # 实现脱离浏览器的长效自动续期。见 `teams-copilot-proxy login` / `login-device`。
+    oauth_client_id: str = Field(default=DEFAULT_CLIENT_ID, alias="M365_OAUTH_CLIENT_ID")
+    oauth_authority: str = Field(default=DEFAULT_AUTHORITY, alias="M365_OAUTH_AUTHORITY")
+    oauth_scope: str = Field(default=DEFAULT_SCOPE, alias="M365_OAUTH_SCOPE")
+    oauth_redirect_uri: str = Field(default=DEFAULT_REDIRECT_URI, alias="M365_OAUTH_REDIRECT_URI")
+    # refresh_token 缓存文件（含长效凭据，务必限制文件权限）。
+    oauth_cache_path: str = Field(default=".oauth_tokens.json", alias="M365_OAUTH_CACHE_PATH")
 

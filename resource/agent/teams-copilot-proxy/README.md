@@ -194,6 +194,39 @@ uv run teams-copilot-proxy serve --no-launch-chrome
 
 You can also press `r` in the server console to refresh the token manually.
 
+### OAuth Sign-In (PKCE, browserless refresh)
+
+Instead of scraping the browser WebSocket token, you can sign in once with the
+standard Microsoft identity platform OAuth 2.0 + PKCE flow. This yields a
+`refresh_token` (via the `offline_access` scope) that renews the substrate
+access token automatically, with no browser kept alive. See ADR-0008 for the
+protocol details and security trade-offs.
+
+Interactive sign-in (opens a browser, then paste the redirect URL back):
+
+```bat
+uv run teams-copilot-proxy login
+```
+
+Headless / no-browser environments (device code):
+
+```bat
+uv run teams-copilot-proxy login-device
+```
+
+Both commands cache the token set to `.oauth_tokens.json` (owner-only
+permissions) and write `M365_ACCESS_TOKEN` to `.env`. Once a `refresh_token` is
+cached, `serve` prefers OAuth refresh over the Chrome WebSocket scrape (falling
+back to Chrome if OAuth refresh fails), so you can run `serve --no-launch-chrome`.
+Force a one-off refresh with:
+
+```bat
+uv run teams-copilot-proxy oauth-refresh
+```
+
+> Security: `.oauth_tokens.json` holds a long-lived `refresh_token` — treat it
+> like a password. It is git-ignored; do not commit or share it.
+
 ### Manual Fallback
 
 ```bat
@@ -293,6 +326,11 @@ Most users only need `.env` after the proxy captures a token.
 | `M365_MONITOR_RETENTION_DAYS` | `30` | Optional. Monitor rows older than this are deleted automatically. |
 | `M365_MONITOR_TOKEN` | unset | Optional. Separate Bearer token for `/monitor/api/*`; falls back to `M365_ACCESS_TOKEN` when empty. |
 | `M365_PROXY` | unset | Optional. HTTP proxy URL (e.g. `http://127.0.0.1:7890`) for the outbound Substrate WebSocket. Needed when the machine reaches the internet through a local proxy, because the system proxy setting is not applied to the WebSocket automatically. |
+| `M365_OAUTH_CLIENT_ID` | Office web Copilot client | Optional. Public client used for the PKCE `login`/`login-device` flow (ADR-0008). |
+| `M365_OAUTH_AUTHORITY` | `https://login.microsoftonline.com/common` | Optional. OAuth authority (multi-tenant by default). |
+| `M365_OAUTH_SCOPE` | substrate sydney + `offline_access` | Optional. Requested scopes; `offline_access` is required to obtain a `refresh_token`. |
+| `M365_OAUTH_REDIRECT_URI` | `.../oauth2/nativeclient` | Optional. Redirect URI for the Authorization Code flow; must be registered for the client. |
+| `M365_OAUTH_CACHE_PATH` | `.oauth_tokens.json` | Optional. Where the OAuth token set (incl. long-lived `refresh_token`) is cached. Git-ignored; keep private. |
 
 ## Security Notes
 

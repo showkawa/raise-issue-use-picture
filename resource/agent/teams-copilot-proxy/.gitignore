@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 monitor.db*
+.oauth_tokens.json
+.probe_cache.json

@@ -1,7 +1,7 @@
 # ADR-0008: PKCE OAuth 作为 substrate token 获取的候选演进路径
 
-- 状态：已提议（未采纳，记录为候选演进项）
-- 日期：2026-07-26
+- 状态：已采纳（opt-in 实现，与 ADR-0001 浏览器抓取方案并存）
+- 日期：2026-07-26（2026-07-26 更新为已实现）
 
 ## 背景
 
@@ -11,8 +11,9 @@ ADR-0001 决定用浏览器抓取 substrate token（CDP，无 MSAL）。该方�
 
 ## 决策
 
-- **暂不采纳**，保留 ADR-0001 的浏览器抓取方案为当前实现。
-- 将 PKCE OAuth 记录为"需要脱离浏览器依赖/支持无头环境时"的候选演进项。
+- **已作为 opt-in 实现**（`oauth_pkce.py` + CLI `login`/`login-device`/`oauth-refresh`），与 ADR-0001 的浏览器抓取方案并存。
+- `serve` 的刷新链路优先尝试 OAuth `refresh_token`（缓存存在时），失败再回退到 Chrome WebSocket 抓取；因此可以 `serve --no-launch-chrome` 完全脱离浏览器运行。
+- 默认仍不强制启用：未执行 `login` 时行为与之前完全一致（无缓存则 `refresh_token` 分支直接跳过）。
 
 ## 技术细节（逆向自 Copilot2API `internal/auth/`）
 
