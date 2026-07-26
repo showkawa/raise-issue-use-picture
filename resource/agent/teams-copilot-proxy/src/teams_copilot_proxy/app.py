@@ -99,6 +99,28 @@ _REASONING_SIBLING = {
 }
 
 
+_NO_TOOL_SIGNAL = "NO_TOOL_NEEDED"
+# Two-phase tool router (opt-in, ported from HEXUXIU/M365-Copilot2API). Phase 1
+# is a dedicated tool-SELECTION turn: the model must emit the tool call(s) or the
+# explicit no-tool sentinel and nothing else, which stops reasoning tones from
+# answering in prose while silently dropping the call they needed.
+_ROUTER_SELECT_RULES = (
+    "TOOL-SELECTION TURN. Your only task right now is to choose the next tool "
+    "call needed to make progress on the user's request. If a tool is needed, "
+    "reply with the ```tool_call fenced JSON block(s) and nothing else. If — and "
+    "only if — no tool is needed to fulfil the request, reply with exactly "
+    f"{_NO_TOOL_SIGNAL} and nothing else. Do not write the final answer in this turn."
+)
+
+
+def _normalize_planning_mode(raw: str) -> str:
+    return "router" if (raw or "").strip().lower() == "router" else "single"
+
+
+def _is_no_tool_signal(text: str) -> bool:
+    return _NO_TOOL_SIGNAL.lower() in (text or "").strip().lower()
+
+
 def _upstream_http_error(exc: SubstrateCopilotError) -> HTTPException:
     if isinstance(exc, SubstrateThrottledError):
         return HTTPException(
@@ -308,8 +330,9 @@ def create_app(
                 settings.dedup_websearch,
             )
             _record_tool_results(recorder, request.messages)
+            planning_mode = _normalize_planning_mode(settings.tool_planning_mode)
             if translated.tools:
-                recorder.mark_tool_turn(planning_mode="single")
+                recorder.mark_tool_turn(planning_mode=planning_mode)
                 ledger = _build_agent_ledger(request.messages)
                 recorder.mark_ledger(
                     repeated_call=ledger.repeated_call,
@@ -354,6 +377,7 @@ def create_app(
                             chunk_delay_ms=settings.stream_chunk_delay_ms,
                             input_text=input_text,
                             recorder=recorder,
+                            planning_mode=planning_mode,
                         ),
                         media_type="text/event-stream",
                     )
@@ -379,6 +403,7 @@ def create_app(
                     settings.tool_correction_retries,
                     allow_parallel,
                     recorder=recorder,
+                    planning_mode=planning_mode,
                 )
                 body = _tool_outcome_completion(
                     settings.model_alias,
@@ -696,7 +721,19 @@ async def _chat_resolving_tools(
     max_corrections: int = 1,
     allow_parallel: bool = False,
     recorder=_NULL_RECORDER,
+    planning_mode: str = "single",
 ) -> ToolParseOutcome:
+    if planning_mode == "router":
+        return await _route_resolving_tools(
+            client,
+            prompt,
+            additional_context,
+            tools,
+            session,
+            max_corrections,
+            allow_parallel,
+            recorder=recorder,
+        )
     allowed = tool_names(tools)
     schemas = tool_schemas(tools)
     parse = parse_model_output_multi if allow_parallel else parse_model_output
@@ -779,6 +816,56 @@ async def _chat_resolving_tools(
         return ToolParseOutcome(text=TOOL_FAILURE_SENTINEL, guard=TOOL_PARSE_FAILURE)
 
 
+async def _route_resolving_tools(
+    client: SubstrateCopilotClient,
+    prompt: str,
+    additional_context: list[str],
+    tools: list[dict],
+    session: PersistentSession | None = None,
+    max_corrections: int = 1,
+    allow_parallel: bool = False,
+    recorder=_NULL_RECORDER,
+) -> ToolParseOutcome:
+    """Two-phase tool planning (opt-in, ``M365_TOOL_PLANNING_MODE=router``).
+
+    Phase 1 runs a dedicated tool-selection turn that must answer with the tool
+    call(s) or the explicit ``NO_TOOL_NEEDED`` sentinel; it reuses the single-mode
+    engine so shell-fence recovery, in-reply de-duplication, JSON-schema
+    pre-validation, the correction-retry budget (the "repair" pass), and the
+    confabulation/disengagement guards all still apply. Only when phase 1 selects
+    no tool does phase 2 make a separate turn for the natural-language answer, so a
+    reasoning tone can never bury the call it needed inside prose. Both turns are
+    recorded, so the Monitor's per-``planning_mode`` metrics capture the extra
+    substrate round trip for the router-vs-single A/B.
+    """
+    select_context = additional_context + [_ROUTER_SELECT_RULES]
+    outcome = await _chat_resolving_tools(
+        client,
+        prompt,
+        select_context,
+        tools,
+        session,
+        max_corrections,
+        allow_parallel,
+        recorder=recorder,
+        planning_mode="single",
+    )
+    if outcome.tool_calls or outcome.guard is not None:
+        return outcome
+    if not _is_no_tool_signal(outcome.text):
+        # The selection turn produced neither a tool call nor the sentinel; treat
+        # the reply as the answer rather than burning another round trip.
+        return outcome
+    started = recorder.attempt_timer()
+    try:
+        text = await client.chat(prompt, additional_context, session)
+    except SubstrateDisengagedError:
+        recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
+        return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
+    recorder.add_attempt(started, status=STATUS_OK, text=text)
+    return ToolParseOutcome(text=text.strip())
+
+
 def _tool_outcome_completion(
     model_alias: str,
     outcome: ToolParseOutcome,
@@ -839,6 +926,7 @@ async def _openai_stream_with_tools(
     chunk_delay_ms: int = 0,
     input_text: str = "",
     recorder=_NULL_RECORDER,
+    planning_mode: str = "single",
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -866,6 +954,7 @@ async def _openai_stream_with_tools(
             max_corrections,
             allow_parallel,
             recorder=recorder,
+            planning_mode=planning_mode,
         )
     )
     try:

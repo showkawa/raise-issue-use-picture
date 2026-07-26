@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     max_transcript_chars: int = Field(default=200_000, alias="M365_MAX_TRANSCRIPT_CHARS")
     proxy: str = Field(default="", alias="M365_PROXY")
     tool_correction_retries: int = Field(default=1, alias="M365_TOOL_CORRECTION_RETRIES")
+    # Tool-turn planning strategy (baseline for the Monitor A/B, see README):
+    #   "single" (default) — one model turn decides the tool call and/or the answer.
+    #   "router"           — a dedicated tool-selection turn first (with a repair
+    #                        pass), then a separate answer turn only if no tool is
+    #                        needed. Ported opt-in from HEXUXIU/M365-Copilot2API.
+    tool_planning_mode: str = Field(default="single", alias="M365_TOOL_PLANNING_MODE")
     redact_outbound: bool = Field(default=True, alias="M365_REDACT_OUTBOUND")
     suppress_system_prompt_with_tools: bool = Field(
         default=False, alias="M365_SUPPRESS_SYSTEM_PROMPT_WITH_TOOLS"

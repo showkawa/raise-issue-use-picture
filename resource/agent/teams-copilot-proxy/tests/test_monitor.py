@@ -491,6 +491,21 @@ def test_tool_efficiency_baseline_for_successful_tool_call(tmp_path) -> None:
     assert row["deduped"] == 0
 
 
+def test_tool_efficiency_records_router_planning_mode(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(
+        fake, tmp_path, M365_TOOL_PLANNING_MODE="router"
+    )
+    chat(client, tools=SAMPLE_TOOLS)
+
+    modes = _efficiency(client)
+    assert len(modes) == 1
+    row = modes[0]
+    assert row["planning_mode"] == "router"
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 1
+
+
 def test_tool_efficiency_excludes_non_tool_requests(tmp_path) -> None:
     client = build_monitor_client(FakeCopilotClient(), tmp_path)
     chat(client)  # no tools

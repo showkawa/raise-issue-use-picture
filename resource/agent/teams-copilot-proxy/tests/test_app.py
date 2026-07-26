@@ -2232,3 +2232,80 @@ def test_agent_ledger_hint_none_without_tool_history() -> None:
 
     messages = [OpenAIMessage(role="user", content="hi")]
     assert _agent_ledger_hint(messages) is None
+
+
+def _router_client(fake: FakeCopilotClient) -> TestClient:
+    settings = Settings(M365_ACCESS_TOKEN="fake-token", M365_TOOL_PLANNING_MODE="router")
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    return TestClient(app)
+
+
+def test_router_mode_selects_tool_in_a_single_turn() -> None:
+    fake = ToolCallingCopilotClient(
+        ['```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```']
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    # Only the selection turn runs when a tool is chosen (no wasted answer turn).
+    assert len(fake.calls) == 1
+    select_context = fake.calls[0][1]
+    assert any("TOOL-SELECTION TURN" in part for part in select_context)
+
+
+def test_router_mode_makes_a_second_turn_for_the_answer() -> None:
+    fake = ToolCallingCopilotClient(["NO_TOOL_NEEDED", "The capital is Paris."])
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "The capital is Paris."
+    # Phase 1 selection turn + phase 2 answer turn.
+    assert len(fake.calls) == 2
+    assert any("TOOL-SELECTION TURN" in part for part in fake.calls[0][1])
+    assert not any("TOOL-SELECTION TURN" in part for part in fake.calls[1][1])
+
+
+def test_router_mode_repairs_malformed_selection() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            '```tool_call\n{"name": "read_file", "arguments": {broken\n```',
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
+        ]
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert len(fake.calls) == 2
+    assert "could not be parsed" in fake.calls[1][0]
