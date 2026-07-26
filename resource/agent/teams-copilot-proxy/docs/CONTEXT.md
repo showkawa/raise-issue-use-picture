@@ -33,3 +33,11 @@
 
 - **`/v1/chat/completions`**：agentic 能力的**唯一保证面**。tools / tool_choice / 流式 / 多 model / finish_reason / 429 分型都在这里。
 - **`/v1/responses`**：仅保留**无工具的文本兼容**。agentic 客户端请用 chat completions；Codex 请配 `wire_api=chat`。
+
+## Monitor（阶段二）
+
+- **Session**：一次 OpenCode 对话线程。请求带 `x-session-id` header 时优先用它标识，否则用 conversation key（首条 user 消息哈希）。不是 substrate WebSocket 会话。
+- **Attempt**：一次 chat completion 请求内部的单次 substrate 往返。守卫触发或解析纠正会在同一请求内追加 Attempt，形成 attempt 链。
+- **Capture 档位**：monitor 的内容留存级别，`off`（只记元数据）/ `failures`（仅失败或守卫触发的请求保留脱敏 prompt/回复片段，默认）/ `all`。
+- **Monitor**：进程内可观测子系统：事件总线 → SQLite sink → 只读 `/monitor` API 与面板（复用 proxy Bearer token 认证）。
+- **工具闭环 (tool call closure)**：把某轮发出的 tool_call 与下一轮请求中的 `Tool result (...)` 配对，只记录 error 标记与结果字节数。
