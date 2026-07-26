@@ -309,7 +309,13 @@ def create_app(
             )
             _record_tool_results(recorder, request.messages)
             if translated.tools:
-                ledger_hint = _agent_ledger_hint(request.messages)
+                recorder.mark_tool_turn(planning_mode="single")
+                ledger = _build_agent_ledger(request.messages)
+                recorder.mark_ledger(
+                    repeated_call=ledger.repeated_call,
+                    repeated_failure=ledger.repeated_failure,
+                )
+                ledger_hint = _format_agent_ledger_hint(ledger)
                 if ledger_hint is not None:
                     translated.additional_context.append(ledger_hint)
             translated = _redact_translated(translated, settings)
@@ -463,6 +469,12 @@ def create_app(
         monitor.flush()
         return {"tools": monitor.sink.tools()}
 
+    @app.get("/monitor/api/tool-efficiency")
+    async def monitor_tool_efficiency(raw_request: Request) -> dict:
+        monitor = require_monitor(raw_request)
+        monitor.flush()
+        return {"modes": monitor.sink.tool_efficiency()}
+
     @app.get("/monitor/api/errors")
     async def monitor_errors(raw_request: Request, limit: int = 100) -> dict:
         monitor = require_monitor(raw_request)
@@ -550,7 +562,10 @@ def _agent_ledger_hint(messages: Sequence[OpenAIMessage]) -> str | None:
     already completed (so they are final evidence and must not be repeated) plus
     a strategy-change nudge when the transcript is looping. Purely additive
     context that never blocks the request."""
-    ledger = _build_agent_ledger(messages)
+    return _format_agent_ledger_hint(_build_agent_ledger(messages))
+
+
+def _format_agent_ledger_hint(ledger: _AgentLedger) -> str | None:
     if not ledger.completed and not ledger.repeated_call:
         return None
     evidence = [
@@ -712,7 +727,11 @@ async def _chat_resolving_tools(
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
         outcome = parse(text, allowed)
         if outcome.error is None and outcome.tool_calls:
+            if outcome.source in ("shell_fence", "bare_command"):
+                recorder.add_shell_recovery()
+            before = len(outcome.tool_calls)
             outcome.tool_calls = dedupe_tool_calls(outcome.tool_calls)
+            recorder.add_dedup(before - len(outcome.tool_calls))
             for call in outcome.tool_calls:
                 schema_error = validate_tool_arguments(
                     call.name, call.arguments, schemas

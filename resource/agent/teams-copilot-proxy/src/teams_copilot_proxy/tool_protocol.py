@@ -103,6 +103,9 @@ class ToolParseOutcome:
     tool_calls: list[ParsedToolCall] = field(default_factory=list)
     error: str | None = None
     guard: str | None = None
+    # How the tool call(s) were recovered when not from a proper tool_call fence,
+    # e.g. "shell_fence" / "bare_command". Telemetry only; None on the normal path.
+    source: str | None = None
 
     @property
     def tool_call(self) -> ParsedToolCall | None:
@@ -397,6 +400,7 @@ def _try_shell_fallback(
         return ToolParseOutcome(
             text=leading,
             tool_calls=[ParsedToolCall(name=target, arguments={"command": command})],
+            source="shell_fence",
         )
     if matches:
         return None
@@ -419,7 +423,9 @@ def _try_shell_fallback(
         if payload.get(key) is not None:
             arguments[key] = payload[key]
     return ToolParseOutcome(
-        text="", tool_calls=[ParsedToolCall(name=target, arguments=arguments)]
+        text="",
+        tool_calls=[ParsedToolCall(name=target, arguments=arguments)],
+        source="bare_command",
     )
 
 

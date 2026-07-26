@@ -446,6 +446,156 @@ def test_dashboard_404_when_monitor_disabled(tmp_path) -> None:
     assert client.get("/monitor").status_code == 404
 
 
+SHELL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            },
+        },
+    }
+]
+
+
+def _efficiency(client: TestClient) -> list[dict]:
+    return client.get("/monitor/api/tool-efficiency", headers=AUTH).json()["modes"]
+
+
+def test_tool_efficiency_requires_bearer_token(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert client.get("/monitor/api/tool-efficiency").status_code == 401
+    assert (
+        client.get("/monitor/api/tool-efficiency", headers=AUTH).status_code == 200
+    )
+
+
+def test_tool_efficiency_baseline_for_successful_tool_call(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    modes = _efficiency(client)
+    assert len(modes) == 1
+    row = modes[0]
+    assert row["planning_mode"] == "single"
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 1
+    assert row["tool_call_yield"] == 1.0
+    assert row["avg_attempts"] == 1.0
+    assert row["guard_rate"] == 0.0
+    assert row["shell_recovered"] == 0
+    assert row["deduped"] == 0
+
+
+def test_tool_efficiency_excludes_non_tool_requests(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client)  # no tools
+    assert _efficiency(client) == []
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["had_tools"] == 0
+
+
+def test_tool_efficiency_counts_corrections_and_missed_yield(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    row = _efficiency(client)[0]
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 0
+    assert row["tool_call_yield"] == 0.0
+    assert row["guard_rate"] == 1.0
+    assert row["avg_attempts"] == 2.0
+    assert row["avg_corrections"] == 1.0
+
+
+def test_shell_fence_recovery_counted(tmp_path) -> None:
+    fake = ScriptedCopilotClient(["Let me list files.\n```bash\nls -la\n```"])
+    client = build_monitor_client(fake, tmp_path)
+    body = chat(client, tools=SHELL_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "bash"
+
+    row = _efficiency(client)[0]
+    assert row["shell_recovered"] == 1
+    assert row["with_tool_call"] == 1
+
+
+def test_dedup_counted(tmp_path) -> None:
+    dup = (
+        '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```\n'
+        '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```'
+    )
+    fake = ScriptedCopilotClient([dup])
+    client = build_monitor_client(
+        fake, tmp_path, M365_ALLOW_PARALLEL_TOOL_CALLS=True
+    )
+    body = chat(client, tools=SAMPLE_TOOLS)
+    assert len(body["choices"][0]["message"]["tool_calls"]) == 1
+
+    row = _efficiency(client)[0]
+    assert row["deduped"] == 1
+
+
+def test_repeated_failure_flag_recorded(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "read", "arguments": '{"filePath": "a.py"}'},
+    }
+    dup_call = {**call, "id": "call_2"}
+    messages = [
+        {"role": "user", "content": "Read a.py"},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Error: boom"},
+        {"role": "assistant", "content": None, "tool_calls": [dup_call]},
+        {"role": "tool", "tool_call_id": "call_2", "content": "Error: boom"},
+    ]
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "claude-sonnet", "tools": SAMPLE_TOOLS, "messages": messages},
+    )
+    assert response.status_code == 200
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["repeated_failure"] == 1
+
+
+def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
+    import sqlite3
+
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts REAL, "
+        "session_key TEXT, duration_ms INTEGER)"
+    )
+    conn.commit()
+    conn.close()
+
+    sink = SQLiteSink(db, retention_days=0)
+    try:
+        columns = {
+            row[1]
+            for row in sink._conn.execute("PRAGMA table_info(requests)").fetchall()
+        }
+        assert {
+            "had_tools",
+            "planning_mode",
+            "shell_recovered",
+            "deduped",
+            "repeated_call",
+            "repeated_failure",
+        } <= columns
+    finally:
+        sink.close()
+
+
 def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:
     sink = SQLiteSink(str(tmp_path / "monitor.db"), retention_days=30)
     old = RequestRecord(

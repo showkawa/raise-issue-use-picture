@@ -68,6 +68,14 @@ def tool_category(name: str) -> str:
     return "other"
 
 
+def _percentile(sorted_values: list[int], fraction: float) -> int | None:
+    """Nearest-rank percentile over an already-sorted list; None when empty."""
+    if not sorted_values:
+        return None
+    index = max(0, min(len(sorted_values) - 1, round(fraction * (len(sorted_values) - 1))))
+    return sorted_values[index]
+
+
 def _truncate(text: str | None, limit: int = _SNIPPET_LIMIT) -> str | None:
     if not text:
         return None
@@ -139,6 +147,13 @@ class RequestRecord:
     error_type: str | None = None
     prompt_summary: str | None = None
     reply_snippet: str | None = None
+    # Tool-planning telemetry (baseline for a later router-vs-single comparison).
+    had_tools: bool = False
+    planning_mode: str = "single"
+    shell_recovered: int = 0
+    deduped: int = 0
+    repeated_call: bool = False
+    repeated_failure: bool = False
     attempts: list[AttemptRecord] = field(default_factory=list)
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     tool_results: list[ToolResultRecord] = field(default_factory=list)
@@ -216,6 +231,35 @@ class RequestRecorder:
             )
         except Exception:  # pragma: no cover - defensive
             logger.debug("monitor record_tool_result failed", exc_info=True)
+
+    def mark_tool_turn(self, *, planning_mode: str = "single") -> None:
+        """Flag that this request carried tool definitions (the denominator for
+        tool-call reliability) and record which planning mode produced it."""
+        try:
+            self.record.had_tools = True
+            self.record.planning_mode = planning_mode
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor mark_tool_turn failed", exc_info=True)
+
+    def mark_ledger(self, *, repeated_call: bool, repeated_failure: bool) -> None:
+        try:
+            self.record.repeated_call = repeated_call
+            self.record.repeated_failure = repeated_failure
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor mark_ledger failed", exc_info=True)
+
+    def add_shell_recovery(self, count: int = 1) -> None:
+        try:
+            self.record.shell_recovered += count
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor add_shell_recovery failed", exc_info=True)
+
+    def add_dedup(self, count: int) -> None:
+        try:
+            if count > 0:
+                self.record.deduped += count
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor add_dedup failed", exc_info=True)
 
     def stream_chunk(self) -> None:
         """每个 SSE 内容 chunk 调一次；只更新聚合指标，不落库。"""
@@ -318,6 +362,18 @@ class _NullRecorder:
     def record_tool_result(self, **kwargs) -> None:
         return None
 
+    def mark_tool_turn(self, *args, **kwargs) -> None:
+        return None
+
+    def mark_ledger(self, *args, **kwargs) -> None:
+        return None
+
+    def add_shell_recovery(self, *args, **kwargs) -> None:
+        return None
+
+    def add_dedup(self, *args, **kwargs) -> None:
+        return None
+
     def stream_chunk(self) -> None:
         return None
 
@@ -365,7 +421,13 @@ class SQLiteSink:
                     first_chunk_ms INTEGER,
                     chunk_count INTEGER,
                     avg_chunk_interval_ms INTEGER,
-                    stream_complete INTEGER
+                    stream_complete INTEGER,
+                    had_tools INTEGER,
+                    planning_mode TEXT,
+                    shell_recovered INTEGER,
+                    deduped INTEGER,
+                    repeated_call INTEGER,
+                    repeated_failure INTEGER
                 )
                 """
             )
@@ -423,6 +485,29 @@ class SQLiteSink:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)"
             )
+        self._migrate_requests()
+
+    def _migrate_requests(self) -> None:
+        """Additive column migration so databases created before the tool-planning
+        telemetry gain the new columns without dropping existing rows."""
+        wanted = {
+            "had_tools": "INTEGER",
+            "planning_mode": "TEXT",
+            "shell_recovered": "INTEGER",
+            "deduped": "INTEGER",
+            "repeated_call": "INTEGER",
+            "repeated_failure": "INTEGER",
+        }
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(requests)").fetchall()
+        }
+        with self._conn:
+            for column, col_type in wanted.items():
+                if column not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE requests ADD COLUMN {column} {col_type}"
+                    )
 
     def write(self, rec: RequestRecord) -> None:
         with self._lock, self._conn:
@@ -433,8 +518,9 @@ class SQLiteSink:
                     prompt_tokens, completion_tokens, total_tokens, duration_ms,
                     error, error_type, prompt_summary, reply_snippet,
                     first_chunk_ms, chunk_count, avg_chunk_interval_ms,
-                    stream_complete
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    stream_complete, had_tools, planning_mode, shell_recovered,
+                    deduped, repeated_call, repeated_failure
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     rec.id,
@@ -457,6 +543,12 @@ class SQLiteSink:
                     rec.stream_stats.chunk_count if rec.stream else None,
                     rec.stream_stats.avg_chunk_interval_ms,
                     (1 if rec.stream_stats.complete else 0) if rec.stream else None,
+                    1 if rec.had_tools else 0,
+                    rec.planning_mode,
+                    rec.shell_recovered,
+                    rec.deduped,
+                    1 if rec.repeated_call else 0,
+                    1 if rec.repeated_failure else 0,
                 ),
             )
             for call in rec.tool_calls:
@@ -647,6 +739,76 @@ class SQLiteSink:
                 data["error_rate"] = (data["errors"] / closed) if closed else 0.0
                 tools.append(data)
             return tools
+        finally:
+            conn.close()
+
+    def tool_efficiency(self) -> list[dict]:
+        """Per-planning-mode tool-call reliability & cost, grouped by
+        ``planning_mode`` over tool-bearing requests only. This is the baseline a
+        later router mode can be A/B'd against: tool-call yield, correction /
+        guard / error rates, round-trips and latency (p50/p95), plus how often
+        the ledger/shell/dedup mechanisms fired.
+        """
+        conn = self._readonly_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(r.planning_mode, 'single') AS planning_mode,
+                    COUNT(*) AS requests,
+                    SUM(CASE WHEN tc.calls > 0 THEN 1 ELSE 0 END) AS with_tool_call,
+                    SUM(CASE WHEN r.guard IS NOT NULL THEN 1 ELSE 0 END) AS guarded,
+                    SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) AS errors,
+                    COALESCE(SUM(at.attempts), 0) AS attempts,
+                    COALESCE(SUM(at.retries), 0) AS corrections,
+                    COALESCE(SUM(r.shell_recovered), 0) AS shell_recovered,
+                    COALESCE(SUM(r.deduped), 0) AS deduped,
+                    COALESCE(SUM(r.repeated_call), 0) AS repeated_call,
+                    COALESCE(SUM(r.repeated_failure), 0) AS repeated_failure,
+                    COALESCE(SUM(r.total_tokens), 0) AS total_tokens
+                FROM requests r
+                LEFT JOIN (
+                    SELECT request_id, COUNT(*) AS attempts,
+                        SUM(retried) AS retries
+                    FROM attempts GROUP BY request_id
+                ) at ON at.request_id = r.id
+                LEFT JOIN (
+                    SELECT request_id, COUNT(*) AS calls
+                    FROM tool_calls GROUP BY request_id
+                ) tc ON tc.request_id = r.id
+                WHERE r.had_tools = 1
+                GROUP BY COALESCE(r.planning_mode, 'single')
+                ORDER BY requests DESC
+                """
+            ).fetchall()
+            out = []
+            for row in rows:
+                data = dict(row)
+                mode = data["planning_mode"]
+                total = data["requests"] or 0
+                durations = [
+                    d[0]
+                    for d in conn.execute(
+                        "SELECT duration_ms FROM requests "
+                        "WHERE had_tools = 1 "
+                        "AND COALESCE(planning_mode, 'single') = ? "
+                        "AND duration_ms IS NOT NULL ORDER BY duration_ms",
+                        (mode,),
+                    ).fetchall()
+                ]
+                data["tool_call_yield"] = (
+                    data["with_tool_call"] / total if total else 0.0
+                )
+                data["guard_rate"] = data["guarded"] / total if total else 0.0
+                data["error_rate"] = data["errors"] / total if total else 0.0
+                data["avg_attempts"] = data["attempts"] / total if total else 0.0
+                data["avg_corrections"] = (
+                    data["corrections"] / total if total else 0.0
+                )
+                data["p50_duration_ms"] = _percentile(durations, 0.50)
+                data["p95_duration_ms"] = _percentile(durations, 0.95)
+                out.append(data)
+            return out
         finally:
             conn.close()
 

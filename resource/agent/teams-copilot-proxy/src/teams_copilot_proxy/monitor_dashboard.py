@@ -75,7 +75,9 @@ function fmtTs(ts) { return new Date(ts * 1000).toLocaleString(); }
 function card(k, v) { return `<div class="card"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`; }
 
 async function renderSummary() {
-  const [s, tools] = await Promise.all([api('summary'), api('tools')]);
+  const [s, tools, eff] = await Promise.all([
+    api('summary'), api('tools'), api('tool-efficiency')
+  ]);
   let html = '<div class="cards">'
     + card('requests', s.requests)
     + card('total tokens', s.total_tokens)
@@ -84,6 +86,23 @@ async function renderSummary() {
     + card('error rate', (s.error_rate * 100).toFixed(1) + '%')
     + card('guard rate', (s.guard_rate * 100).toFixed(1) + '%')
     + '</div>';
+  html += '<h2>Tool planning (baseline for router A/B)</h2>';
+  if (eff.modes.length) {
+    html += '<table><tr><th>mode</th><th>tool reqs</th><th>tool-call yield</th>'
+      + '<th>avg attempts</th><th>avg corrections</th><th>guard rate</th>'
+      + '<th>error rate</th><th>p50 ms</th><th>p95 ms</th><th>shell recov</th>'
+      + '<th>deduped</th><th>repeat call</th><th>repeat fail</th></tr>'
+      + eff.modes.map(m => `<tr><td>${esc(m.planning_mode)}</td><td>${m.requests}</td>`
+        + `<td>${(m.tool_call_yield * 100).toFixed(1)}%</td>`
+        + `<td>${m.avg_attempts.toFixed(2)}</td><td>${m.avg_corrections.toFixed(2)}</td>`
+        + `<td>${(m.guard_rate * 100).toFixed(1)}%</td><td>${(m.error_rate * 100).toFixed(1)}%</td>`
+        + `<td>${m.p50_duration_ms ?? ''}</td><td>${m.p95_duration_ms ?? ''}</td>`
+        + `<td>${m.shell_recovered}</td><td>${m.deduped}</td>`
+        + `<td>${m.repeated_call}</td><td>${m.repeated_failure}</td></tr>`).join('')
+      + '</table>';
+  } else {
+    html += '<p class="muted">no tool-bearing requests yet</p>';
+  }
   html += '<h2>Tones</h2><table><tr><th>tone</th><th>requests</th></tr>'
     + s.tones.map(t => `<tr><td>${esc(t.tone)}</td><td>${t.count}</td></tr>`).join('')
     + '</table>';
