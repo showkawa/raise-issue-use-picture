@@ -141,6 +141,79 @@ def _ordered_tool_names(tools: list[dict[str, Any]]) -> list[str]:
     return ordered
 
 
+def tool_schemas(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    schemas: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        function = tool.get("function", tool)
+        name = function.get("name")
+        parameters = function.get("parameters")
+        if name and isinstance(parameters, dict):
+            schemas[name] = parameters
+    return schemas
+
+
+_JSON_TYPE_CHECKS: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "boolean": (bool,),
+    "object": (dict,),
+    "array": (list,),
+    "integer": (int,),
+    "number": (int, float),
+    "null": (type(None),),
+}
+
+
+def _matches_json_type(value: Any, expected: Any) -> bool:
+    types = expected if isinstance(expected, list) else [expected]
+    for type_name in types:
+        allowed = _JSON_TYPE_CHECKS.get(type_name)
+        if allowed is None:
+            return True
+        if isinstance(value, bool) and type_name in ("integer", "number"):
+            continue
+        if isinstance(value, allowed):
+            return True
+    return False
+
+
+def validate_tool_arguments(
+    name: str, arguments: dict[str, Any], schemas: dict[str, dict[str, Any]]
+) -> str | None:
+    """Lightweight top-level JSON-Schema check of a parsed tool call's arguments.
+
+    Verifies required keys, declared property types, and additionalProperties:
+    false. Deliberately shallow (no nested/anyOf resolution) so a rejection is
+    always a genuine schema violation the model can fix on the correction turn.
+    Returns an error message, or None when the arguments pass.
+    """
+    schema = schemas.get(name)
+    if not schema:
+        return None
+    properties = schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = schema.get("required")
+    required = required if isinstance(required, list) else []
+    missing = [key for key in required if key not in arguments]
+    if missing:
+        return (
+            f'tool "{name}" arguments are missing required '
+            f"key(s): {', '.join(sorted(missing))}"
+        )
+    for key, value in arguments.items():
+        spec = properties.get(key)
+        if not isinstance(spec, dict):
+            if properties and schema.get("additionalProperties") is False:
+                return f'tool "{name}" does not accept an argument named "{key}"'
+            continue
+        expected = spec.get("type")
+        if expected is not None and not _matches_json_type(value, expected):
+            return (
+                f'tool "{name}" argument "{key}" must be of type {expected!r}, '
+                f"got {type(value).__name__}"
+            )
+    return None
+
+
 def tool_reminder(tools: list[dict[str, Any]], allow_parallel: bool = False) -> str:
     """A short, high-recency reminder appended after the user prompt so the tool
     format survives long, instruction-dense contexts that bury the protocol header."""

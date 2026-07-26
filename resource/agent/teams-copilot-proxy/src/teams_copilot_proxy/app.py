@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .config import Settings
-from .probe import CANDIDATE_TONES, probe_capabilities
+from .probe import KNOWN_TONES, probe_capabilities
 from .session_store import PersistentSession, PersistentSessionStore
 from .guards import (
     CONFABULATION,
@@ -59,6 +59,8 @@ from .tool_protocol import (
     parse_model_output,
     parse_model_output_multi,
     tool_names,
+    tool_schemas,
+    validate_tool_arguments,
 )
 from .translator import (
     flatten_content,
@@ -80,6 +82,20 @@ _TONE_BY_MODEL_PREFIX = (
     ("magic", "Magic"),
 )
 
+# Reasoning effort has no substrate-side knob: the tone fixes the model and its
+# reasoning depth. Effort is therefore emulated by tone routing — medium and
+# above upgrade a chat tone to its reasoning sibling; explicit *-reasoning
+# model ids are never downgraded.
+_EFFORT_LEVELS = ("xhigh", "minimal", "medium", "none", "high", "low")
+_UPGRADE_EFFORTS = {"medium", "high", "xhigh"}
+_REASONING_SIBLING = {
+    "Claude_Sonnet": "Claude_Sonnet_Reasoning",
+    "Gpt_5_2_Chat": "Gpt_5_2_Reasoning",
+    "Gpt_5_4_Chat": "Gpt_5_4_Reasoning",
+    "Gpt_5_5_Chat": "Gpt_5_5_Reasoning",
+    "Gpt_Quick": "Gpt_Reasoning",
+}
+
 
 def _upstream_http_error(exc: SubstrateCopilotError) -> HTTPException:
     if isinstance(exc, SubstrateThrottledError):
@@ -100,15 +116,35 @@ def _retry_context(
     ]
 
 
-def _tone_for_model(model: str, default_tone: str) -> str:
+def _split_effort_suffix(name: str) -> tuple[str, str | None]:
+    """Split a `-low`/`-high`/... effort suffix off a model id, if present."""
+    for level in _EFFORT_LEVELS:
+        if name.endswith("-" + level):
+            return name[: -(len(level) + 1)], level
+    return name, None
+
+
+def _tone_for_model(
+    model: str, default_tone: str, reasoning_effort: str | None = None
+) -> str:
     name = model.removesuffix(_PERSIST_MODEL_SUFFIX).lower()
-    for tone in CANDIDATE_TONES:
-        if _model_id_for_tone(tone) == name:
-            return tone
-    for prefix, tone in _TONE_BY_MODEL_PREFIX:
-        if name.startswith(prefix):
-            return tone
-    return default_tone
+    base, suffix_effort = _split_effort_suffix(name)
+    effort = (reasoning_effort or "").strip().lower() or suffix_effort or ""
+    tone = None
+    for known in KNOWN_TONES:
+        if _model_id_for_tone(known) == base:
+            tone = known
+            break
+    if tone is None:
+        for prefix, prefix_tone in _TONE_BY_MODEL_PREFIX:
+            if base.startswith(prefix):
+                tone = prefix_tone
+                break
+    if tone is None:
+        tone = default_tone
+    if effort in _UPGRADE_EFFORTS:
+        tone = _REASONING_SIBLING.get(tone, tone)
+    return tone
 
 
 def _model_id_for_tone(tone: str) -> str:
@@ -252,7 +288,9 @@ def create_app(
         input_text = ""
         try:
             selected_tone = _tone_for_model(
-                request.model, effective_default_tone(settings)
+                request.model,
+                effective_default_tone(settings),
+                request.reasoning_effort,
             )
             recorder, request_id = new_recorder(raw_request, request, selected_tone)
             allow_parallel = settings.allow_parallel_tool_calls or (
@@ -268,6 +306,10 @@ def create_app(
                 settings.dedup_websearch,
             )
             _record_tool_results(recorder, request.messages)
+            if translated.tools:
+                repeat_hint = _repeat_failure_hint(request.messages)
+                if repeat_hint is not None:
+                    translated.additional_context.append(repeat_hint)
             translated = _redact_translated(translated, settings)
             client.tone = selected_tone
             client.images = translated.images
@@ -445,6 +487,37 @@ def _substrate_error_type(exc: SubstrateCopilotError) -> str:
     return "upstream_error"
 
 
+def _repeat_failure_hint(messages: Sequence[OpenAIMessage]) -> str | None:
+    """Detect the transcript re-running an identical tool call that already
+    failed with an identical error, and build a strategy-change hint for the
+    next model turn. Purely additive context; never blocks the request."""
+    call_specs: dict[str, tuple[str, str]] = {}
+    results: list[tuple[str, str, str]] = []
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            for call in message.tool_calls:
+                call_specs[call.id] = (call.function.name, call.function.arguments)
+        if message.role != "tool":
+            continue
+        spec = call_specs.get(message.tool_call_id or "")
+        if spec is None:
+            continue
+        results.append((spec[0], spec[1], flatten_content(message.content).strip()))
+    if len(results) < 2:
+        return None
+    name, args, result = results[-1]
+    if not result.lower().startswith("error"):
+        return None
+    if (name, args, result) not in results[:-1]:
+        return None
+    return (
+        f'Note: the tool "{name}" has already been called more than once with '
+        "identical arguments and failed with the identical error each time. "
+        "Repeating the same call will fail again — change the arguments or take "
+        "a different approach."
+    )
+
+
 def _record_tool_results(recorder, messages: Sequence[OpenAIMessage]) -> None:
     """把 transcript 里的工具执行结果交给 Monitor 做轻量闭环（只提 error 标记与
     字节数，不存结果全文）。配对发生在 sink 写入时，不影响主链路。"""
@@ -552,6 +625,7 @@ async def _chat_resolving_tools(
     recorder=_NULL_RECORDER,
 ) -> ToolParseOutcome:
     allowed = tool_names(tools)
+    schemas = tool_schemas(tools)
     parse = parse_model_output_multi if allow_parallel else parse_model_output
     # Completion claims are only hallucinations when no tool has actually run yet;
     # after real tool results a "created/updated the file" summary is legitimate.
@@ -579,6 +653,14 @@ async def _chat_resolving_tools(
             recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
             return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
         outcome = parse(text, allowed)
+        if outcome.error is None and outcome.tool_calls:
+            for call in outcome.tool_calls:
+                schema_error = validate_tool_arguments(
+                    call.name, call.arguments, schemas
+                )
+                if schema_error is not None:
+                    outcome = ToolParseOutcome(text=text.strip(), error=schema_error)
+                    break
         if outcome.error is None:
             if outcome.tool_call is None and outcome.text:
                 triggered = None

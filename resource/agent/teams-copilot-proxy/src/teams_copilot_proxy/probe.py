@@ -27,6 +27,23 @@ CANDIDATE_TONES = (
     "Gpt_5_6_Reasoning",
 )
 
+# Additional tones the substrate backend is known to accept (confirmed against
+# other Chathub clients). Routable by model id but not probed at startup, so
+# they never slow the boot path; a request simply fails upstream if the tenant
+# does not expose one of them.
+EXTRA_TONES = (
+    "Claude_Sonnet_Reasoning",
+    "Gpt_5_2_Chat",
+    "Gpt_5_2_Reasoning",
+    "Gpt_5_3_Chat",
+    "Gpt_5_4_Chat",
+    "Gpt_5_4_Reasoning",
+    "Gpt_Quick",
+    "Gpt_Reasoning",
+)
+
+KNOWN_TONES = CANDIDATE_TONES + EXTRA_TONES
+
 _PROBE_PROMPT = "Reply with the single word: ok"
 _PROBE_ATTEMPTS = 2
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from teams_copilot_proxy.app import _conversation_key, create_app
+from teams_copilot_proxy.app import _conversation_key, _tone_for_model, create_app
 from teams_copilot_proxy.models import OpenAIMessage
 from teams_copilot_proxy.cli import (
     _find_m365_page,
@@ -1995,3 +1995,120 @@ def test_example_opencode_config_parses_and_declares_tool_call() -> None:
     assert model["tool_call"] is True
     options = config["provider"]["teams-copilot"]["options"]
     assert options["baseURL"] == "http://127.0.0.1:8000/v1"
+
+
+def test_reasoning_effort_routes_chat_tone_to_reasoning_sibling() -> None:
+    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "high") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "medium") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "low") == "Gpt_5_5_Chat"
+    assert _tone_for_model("claude-sonnet", "Claude_Sonnet", "xhigh") == "Claude_Sonnet_Reasoning"
+    assert _tone_for_model("gpt-quick", "Claude_Sonnet", "high") == "Gpt_Reasoning"
+    # Explicit reasoning ids are never downgraded by a low/none effort.
+    assert _tone_for_model("gpt-5-6-reasoning", "Claude_Sonnet", "low") == "Gpt_5_6_Reasoning"
+
+
+def test_effort_suffix_on_model_id_selects_reasoning_tone() -> None:
+    assert _tone_for_model("gpt-5-5-chat-high", "Claude_Sonnet") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("gpt-5-6-reasoning-high", "Claude_Sonnet") == "Gpt_5_6_Reasoning"
+    assert _tone_for_model("gpt-5-6-reasoning-low", "Claude_Sonnet") == "Gpt_5_6_Reasoning"
+    # Explicit request field wins over the suffix.
+    assert _tone_for_model("gpt-5-5-chat-high", "Claude_Sonnet", "low") == "Gpt_5_5_Chat"
+
+
+def test_extended_tone_catalog_routes_by_model_id() -> None:
+    assert _tone_for_model("gpt-5-2-chat", "Claude_Sonnet") == "Gpt_5_2_Chat"
+    assert _tone_for_model("gpt-5-4-reasoning", "Claude_Sonnet") == "Gpt_5_4_Reasoning"
+    assert _tone_for_model("gpt-quick", "Claude_Sonnet") == "Gpt_Quick"
+    assert _tone_for_model("claude-sonnet-reasoning", "Claude_Sonnet") == "Claude_Sonnet_Reasoning"
+
+
+def test_schema_validation_rejects_missing_required_then_retries() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "read_file", "arguments": {}}\n```',
+        '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"path": "main.py"}
+    assert len(fake.calls) == 2
+    correction_prompt = fake.calls[1][0]
+    assert "missing required" in correction_prompt
+
+
+def test_schema_validation_rejects_wrong_argument_type() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "read_file", "arguments": {"path": 123}}\n```',
+        '```tool_call\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read a.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"path": "a.py"}
+    assert "must be of type" in fake.calls[1][0]
+
+
+def _repeated_failure_transcript() -> list[dict]:
+    failing_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path": "gone.py"}'},
+    }
+    second_call = dict(failing_call, id="call_2")
+    return [
+        {"role": "user", "content": "Read gone.py"},
+        {"role": "assistant", "content": None, "tool_calls": [failing_call]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Error: file not found"},
+        {"role": "assistant", "content": None, "tool_calls": [second_call]},
+        {"role": "tool", "tool_call_id": "call_2", "content": "Error: file not found"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_repeated_identical_failure_injects_strategy_hint() -> None:
+    fake = ToolCallingCopilotClient(["I will stop retrying that file."])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": _repeated_failure_transcript(),
+        },
+    )
+
+    assert response.status_code == 200
+    _prompt, context = fake.calls[0]
+    assert any("identical arguments" in part for part in context)
+
+
+def test_single_failure_does_not_inject_strategy_hint() -> None:
+    fake = ToolCallingCopilotClient(["Trying another path."])
+    client = build_client(fake)
+    transcript = _repeated_failure_transcript()[:3] + [{"role": "user", "content": "continue"}]
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "ignored", "tools": SAMPLE_TOOLS, "messages": transcript},
+    )
+
+    assert response.status_code == 200
+    _prompt, context = fake.calls[0]
+    assert not any("identical arguments" in part for part in context)
