@@ -40,7 +40,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Startup capability probe: tests candidate tones and a fenced tool probe, tiers the deployment T1 (Claude + reliable tools) or T3 (best-effort tools), cached for 24h and reported on `/healthz`
 - Guard layer for tool turns: detects confabulation ("I can't access your files"), hallucinated completion, safety-filter disengagement, and upstream throttling; shares a per-request retry budget and reports honestly via an `x_m365_guard` field instead of faking tool success
 - Streaming with tools: immediate HTTP 200, `: keepalive` comments while Copilot thinks, then typewriter-style chunked delivery of plain-text answers (tool calls stay atomic)
-- Built-in read-only Monitor (`/monitor`): request/attempt tracing, token usage, tool-call closure stats, guard/substrate error timeline, and per-session aggregation, backed by a local SQLite file
+- Built-in read-only Monitor (`/monitor`): request/attempt tracing, token usage, tool-call closure stats, per-`planning_mode` tool-planning efficiency (baseline for a future router A/B), guard/substrate error timeline, and per-session aggregation, backed by a local SQLite file
 
 ## Quick Start
 
@@ -281,6 +281,7 @@ Example:
 | `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=`) |
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
 | `GET /monitor/api/tools` | Tool-call ranking with closure status and error rate |
+| `GET /monitor/api/tool-efficiency` | Tool-planning reliability & cost grouped by `planning_mode` (baseline for a future router A/B) |
 | `GET /monitor/api/errors` | Guard and substrate error timeline (newest first) |
 | `GET /monitor/api/sessions/{key}` | Per-session totals plus request/tool/event streams |
 
@@ -295,12 +296,15 @@ What is recorded:
 - **Requests:** model, tone, session key, stream flag, estimated token usage, duration, final status (`ok` / `guard` / `error`).
 - **Attempt chain:** every substrate round trip inside one request (original reply → guard trigger → correction retry → final outcome) with per-attempt duration and guard type.
 - **Tool closure:** tool_calls the model emits are classified (builtin / mcp / skill / task / todowrite / webfetch) and paired with the `Tool result` OpenCode sends on the next turn — only an error flag and byte count, never the result body.
+- **Tool-planning telemetry:** for every request that carries `tools`, the proxy records `planning_mode` (`single` today), whether the round yielded a tool call, how many attempts/corrections it took, and how often the recovery mechanisms fired — shell-fence/bare-command recovery (`shell_recovered`), in-reply de-duplication (`deduped`), and the ledger's repeated-call / repeated-failure flags. This is stored as additive columns and never changes chat behavior.
 - **Stream health:** first-chunk latency, chunk count, average interval, and `[DONE]` completeness as aggregates (no per-chunk rows).
 - **Error timeline:** guard hits, throttling, disengagement, and other upstream failures.
 
+`GET /monitor/api/tool-efficiency` groups these tool-bearing requests by `planning_mode` and reports, per mode: request count, tool-call yield, average attempts and corrections, guard/error rate, p50/p95 latency, and the shell-recovery / dedup / repeated-call / repeated-failure counters. Today everything lands under `single`; when a two-phase tool router is added later as an opt-in mode it will write the same columns under `router`, so the two paths can be compared on real traffic (success, cost, latency) instead of guesswork — no schema redesign required.
+
 Capture policy (`M365_MONITOR_CAPTURE`): `failures` (default) keeps redacted prompt/reply excerpts (~2 KB each) only for failed or guard-triggered requests; `all` keeps them for every request; `off` stores metadata only. Rows older than `M365_MONITOR_RETENTION_DAYS` (default 30) are cleaned up automatically.
 
-Open `http://127.0.0.1:8000/monitor` for the read-only dashboard (Summary / Requests with attempt-chain drill-down / Errors). The page asks for the Bearer token once and keeps it in `localStorage`; the token is `M365_MONITOR_TOKEN` if set, otherwise the current `M365_ACCESS_TOKEN`. Sessions are grouped by an `x-session-id` request header when present, otherwise by a hash of the conversation's first user message.
+Open `http://127.0.0.1:8000/monitor` for the read-only dashboard (Summary — including a **Tool planning (baseline for router A/B)** table — / Requests with attempt-chain drill-down / Errors). The page asks for the Bearer token once and keeps it in `localStorage`; the token is `M365_MONITOR_TOKEN` if set, otherwise the current `M365_ACCESS_TOKEN`. Sessions are grouped by an `x-session-id` request header when present, otherwise by a hash of the conversation's first user message.
 
 ## Environment Variables
 
