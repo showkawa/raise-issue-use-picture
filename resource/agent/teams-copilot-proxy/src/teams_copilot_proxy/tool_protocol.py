@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _TOOL_CALL_FENCE_RE = re.compile(
-    r"```tool_call[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
+    r"```tool_call[ \t]*\r?\n(?P<body>.*?)(?:\r?\n[ \t]*)?```[ \t]*(?:\r?\n|$)",
     re.DOTALL,
 )
 
@@ -15,7 +15,7 @@ _TOOL_CALL_FENCE_RE = re.compile(
 # emit the tool JSON in a mislabelled fence after some thinking, so this is a
 # recall fallback used only when no properly-labelled tool_call fence is present.
 _ANY_FENCE_RE = re.compile(
-    r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n(?P<body>.*?)\r?\n?```",
+    r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n(?P<body>.*?)(?:\r?\n[ \t]*)?```[ \t]*(?:\r?\n|$)",
     re.DOTALL,
 )
 
