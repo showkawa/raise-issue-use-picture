@@ -480,7 +480,7 @@ def test_dashboard_page_served_when_enabled(tmp_path) -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     # 静态壳：不含任何监控数据，数据请求由浏览器带 Bearer token 拉取
-    assert "Teams Copilot Proxy Monitor" in response.text
+    assert "Copilot Proxy Monitor" in response.text
     assert "localStorage" in response.text
 
 

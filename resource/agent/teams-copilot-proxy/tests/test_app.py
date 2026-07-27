@@ -117,6 +117,19 @@ def test_models_endpoint_without_probe() -> None:
     assert body["data"][0]["id"] == "m365-copilot"
 
 
+def test_settings_ignore_a_deployment_env_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "M365_TOOL_PLANNING_MODE=router\nM365_ACCESS_TOKEN=real-token\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings()
+
+    assert settings.tool_planning_mode == "single"
+    assert settings.access_token == ""
+
+
 def test_app_starts_without_token_for_startup_capture() -> None:
     app = create_app(settings=Settings(M365_ACCESS_TOKEN=""))
     client = TestClient(app)
