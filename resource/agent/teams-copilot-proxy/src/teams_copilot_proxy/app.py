@@ -364,10 +364,14 @@ def create_app(
             )
             recorder, request_id = new_recorder(raw_request, request, selected_tone)
             try:
-                raw_body = await raw_request.body()
-                recorder.set_request_body(
-                    raw_body.decode("utf-8", errors="replace")
+                # The body stream may already be consumed by FastAPI's request
+                # parser, so serialize the parsed model instead of re-reading.
+                body_json = (
+                    request.model_dump_json()
+                    if hasattr(request, "model_dump_json")
+                    else request.json()
                 )
+                recorder.set_request_body(body_json)
             except Exception:
                 logger.debug("failed to capture request body", exc_info=True)
             allow_parallel = settings.allow_parallel_tool_calls or (
