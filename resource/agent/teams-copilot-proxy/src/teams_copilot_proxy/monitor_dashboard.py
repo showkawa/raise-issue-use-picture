@@ -9,7 +9,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Teams Copilot Proxy Monitor</title>
+<title>Copilot Proxy Monitor</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #1c2430; }
   header { background: #16324f; color: #fff; padding: 10px 20px; display: flex; align-items: center; gap: 16px; }
@@ -37,7 +37,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Teams Copilot Proxy Monitor</h1>
+  <h1>Copilot Proxy Monitor</h1>
   <nav>
     <button data-view="summary" class="active">Summary</button>
     <button data-view="requests">Requests</button>
