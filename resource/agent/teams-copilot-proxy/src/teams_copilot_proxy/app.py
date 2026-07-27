@@ -363,6 +363,13 @@ def create_app(
                 request.reasoning_effort,
             )
             recorder, request_id = new_recorder(raw_request, request, selected_tone)
+            try:
+                raw_body = await raw_request.body()
+                recorder.set_request_body(
+                    raw_body.decode("utf-8", errors="replace")
+                )
+            except Exception:
+                logger.debug("failed to capture request body", exc_info=True)
             allow_parallel = settings.allow_parallel_tool_calls or (
                 selected_tone
                 in {tone.strip() for tone in settings.parallel_tool_tones.split(",")}
@@ -475,7 +482,7 @@ def create_app(
                 return JSONResponse(body)
             started = recorder.attempt_timer()
             text = await client.chat(translated.prompt, translated.additional_context, session)
-            recorder.add_attempt(started, status=STATUS_OK)
+            recorder.add_attempt(started, status=STATUS_OK, text=text)
         except ValueError as exc:
             recorder.finish(
                 status=STATUS_ERROR,

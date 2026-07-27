@@ -15,8 +15,8 @@ from typing import Protocol, runtime_checkable
 
 # Caps for captured content; only kept under the Monitor capture tiers.
 _FRAME_LIMIT = 2048
-_HEAD_LIMIT = 1024
-_TAIL_LIMIT = 512
+_HEAD_LIMIT = 1536
+_TAIL_LIMIT = 2048
 
 
 @dataclass

@@ -30,6 +30,9 @@ _VALID_CAPTURE = {CAPTURE_OFF, CAPTURE_FAILURES, CAPTURE_ALL}
 
 # 每条现场文本截断上限（约 2KB）
 _SNIPPET_LIMIT = 2048
+_REQUEST_BODY_LIMIT = 16384
+_RESPONSE_TEXT_LIMIT = 8192
+_TOOL_ARGS_LIMIT = 4096
 
 # 请求最终状态
 STATUS_OK = "ok"
@@ -123,6 +126,7 @@ class AttemptRecord:
     final_frame: str | None = None
     sent_head: str | None = None
     sent_tail: str | None = None
+    response_text: str | None = None
 
     def absorb(self, turn: TurnTelemetry) -> None:
         """Copy one substrate round trip's facts onto this attempt."""
@@ -150,6 +154,7 @@ class ToolCallRecord:
     name: str
     category: str
     args_bytes: int
+    arguments: str | None = None
 
 
 @dataclass
@@ -215,6 +220,7 @@ class RequestRecord:
     max_tokens: int | None = None
     response_format: str | None = None
     injections: str | None = None
+    request_body: str | None = None
     shell_recovered: int = 0
     deduped: int = 0
     repeated_call: bool = False
@@ -308,6 +314,13 @@ class RequestRecorder:
         except Exception:  # pragma: no cover - defensive
             logger.debug("monitor set_request_shape failed", exc_info=True)
 
+    def set_request_body(self, body: str) -> None:
+        """记录 OpenCode 发送给 proxy 的原始请求体（受 capture 档位截断）。"""
+        try:
+            self.record.request_body = body
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("monitor set_request_body failed", exc_info=True)
+
     def set_context_pct(self, pct: float) -> None:
         """记录 prompt 估算 token 占 M365 上下文上限的比例。"""
         self.record.context_pct = round(pct, 4)
@@ -331,14 +344,14 @@ class RequestRecorder:
             for call in calls:
                 function = call.get("function", {})
                 name = function.get("name", "")
+                args_text = function.get("arguments", "")
                 self.record.tool_calls.append(
                     ToolCallRecord(
                         call_id=call.get("id", ""),
                         name=name,
                         category=tool_category(name),
-                        args_bytes=len(
-                            function.get("arguments", "").encode("utf-8")
-                        ),
+                        args_bytes=len(args_text.encode("utf-8")),
+                        arguments=_truncate(args_text, _TOOL_ARGS_LIMIT),
                     )
                 )
         except Exception:  # pragma: no cover - defensive
@@ -435,6 +448,7 @@ class RequestRecorder:
                 retried=retried,
                 status=status,
                 text=text,
+                response_text=text,
                 error_detail=_truncate(error_detail, 300),
                 phase=self._phase,
                 injections=",".join(self._injections) or None,
@@ -479,18 +493,25 @@ class RequestRecorder:
         )
         if not keep:
             # off 档、或 failures 档下的正常请求：不保留任何内容现场
+            rec.request_body = None
             for attempt in rec.attempts:
                 attempt.text = None
+                attempt.response_text = None
                 attempt.final_frame = None
                 attempt.sent_head = None
                 attempt.sent_tail = None
             for result in rec.tool_results:
                 result.head = None
+            for call in rec.tool_calls:
+                call.arguments = None
             return
+        rec.request_body = _truncate(rec.request_body, _REQUEST_BODY_LIMIT)
         rec.prompt_summary = _truncate(input_text)
         rec.reply_snippet = _truncate(output_text)
         for attempt in rec.attempts:
-            attempt.text = _truncate(attempt.text)
+            full = attempt.text
+            attempt.response_text = _truncate(full, _RESPONSE_TEXT_LIMIT)
+            attempt.text = _truncate(full)
 
 
 class _NullRecorder:
@@ -509,6 +530,9 @@ class _NullRecorder:
         return None
 
     def set_request_shape(self, **kwargs) -> None:
+        return None
+
+    def set_request_body(self, body: str) -> None:
         return None
 
     def set_context_pct(self, pct: float) -> None:
@@ -605,7 +629,8 @@ class SQLiteSink:
                     top_p REAL,
                     max_tokens INTEGER,
                     response_format TEXT,
-                    injections TEXT
+                    injections TEXT,
+                    request_body TEXT
                 )
                 """
             )
@@ -619,6 +644,7 @@ class SQLiteSink:
                     name TEXT,
                     category TEXT,
                     args_bytes INTEGER,
+                    arguments TEXT,
                     result_error INTEGER,
                     result_bytes INTEGER,
                     result_head TEXT
@@ -664,6 +690,7 @@ class SQLiteSink:
                     final_frame TEXT,
                     sent_head TEXT,
                     sent_tail TEXT,
+                    response_text TEXT,
                     PRIMARY KEY (request_id, seq)
                 )
                 """
@@ -712,6 +739,7 @@ class SQLiteSink:
                 "max_tokens": "INTEGER",
                 "response_format": "TEXT",
                 "injections": "TEXT",
+                "request_body": "TEXT",
             },
         )
         self._add_missing_columns(
@@ -734,9 +762,16 @@ class SQLiteSink:
                 "final_frame": "TEXT",
                 "sent_head": "TEXT",
                 "sent_tail": "TEXT",
+                "response_text": "TEXT",
             },
         )
-        self._add_missing_columns("tool_calls", {"result_head": "TEXT"})
+        self._add_missing_columns(
+            "tool_calls",
+            {
+                "arguments": "TEXT",
+                "result_head": "TEXT",
+            },
+        )
 
     def _add_missing_columns(self, table: str, wanted: dict[str, str]) -> None:
         existing = {
@@ -764,10 +799,11 @@ class SQLiteSink:
                     client_session_id, client_agent, project_path, turn_kind,
                     messages_count, transcript_bytes, system_bytes, context_pct,
                     tools_count, tool_kinds, tools_fingerprint, temperature,
-                    top_p, max_tokens, response_format, injections
+                    top_p, max_tokens, response_format, injections,
+                    request_body
                 ) VALUES (
                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )
                 """,
                 (
@@ -814,6 +850,7 @@ class SQLiteSink:
                     rec.max_tokens,
                     rec.response_format,
                     rec.injections,
+                    rec.request_body,
                 ),
             )
             for call in rec.tool_calls:
@@ -821,8 +858,8 @@ class SQLiteSink:
                     """
                     INSERT OR IGNORE INTO tool_calls (
                         call_id, request_id, session_key, ts, name, category,
-                        args_bytes, result_error, result_bytes
-                    ) VALUES (?,?,?,?,?,?,?,NULL,NULL)
+                        args_bytes, arguments, result_error, result_bytes
+                    ) VALUES (?,?,?,?,?,?,?,?,NULL,NULL)
                     """,
                     (
                         call.call_id,
@@ -832,6 +869,7 @@ class SQLiteSink:
                         call.name,
                         call.category,
                         call.args_bytes,
+                        call.arguments,
                     ),
                 )
             for result in rec.tool_results:
@@ -846,8 +884,8 @@ class SQLiteSink:
                         client_request_id, sent_bytes, first_frame_ms, frames,
                         message_types, reply_bytes, citations, terminated_cleanly,
                         upstream_status, close_reason, final_frame, sent_head,
-                        sent_tail
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        sent_tail, response_text
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         rec.id, a.seq, a.duration_ms, a.guard,
@@ -857,6 +895,7 @@ class SQLiteSink:
                         a.frames, a.message_types, a.reply_bytes, a.citations,
                         _flag(a.terminated_cleanly), a.upstream_status,
                         a.close_reason, a.final_frame, a.sent_head, a.sent_tail,
+                        a.response_text,
                     ),
                 )
         self._writes += 1
@@ -1251,6 +1290,13 @@ class SQLiteSink:
                 dict(a)
                 for a in conn.execute(
                     "SELECT * FROM attempts WHERE request_id = ? ORDER BY seq",
+                    (request_id,),
+                ).fetchall()
+            ]
+            detail["tool_calls"] = [
+                dict(c)
+                for c in conn.execute(
+                    "SELECT * FROM tool_calls WHERE request_id = ?",
                     (request_id,),
                 ).fetchall()
             ]
