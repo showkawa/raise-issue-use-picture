@@ -795,6 +795,18 @@ def test_confabulation_detects_sandbox_and_mount_hallucination() -> None:
     ]
     for reply in live_refusals:
         assert detect_confabulation(reply), reply
+    # /init refusal captured live: the model claims the project path is not part of
+    # its environment even after a glob tool call already returned 100 matches.
+    path_not_exposed = (
+        "The repository path from the prior session is not exposed in the current "
+        "execution environment, so I could not safely inspect or update "
+        "C:\\Users\\hh\\Desktop\\brian\\code\\raise-issue-use-picture\\AGENTS.md. "
+        "No files were modified."
+    )
+    assert detect_confabulation(path_not_exposed)
+    assert detect_confabulation(
+        "The project directory is not mounted, so I stopped without changes."
+    )
     # A normal reply that merely mentions files must not trip the guard.
     assert not detect_confabulation("I will attach the generated report to the PR.")
     assert not detect_confabulation("The program prints 'hello' and then exits.")

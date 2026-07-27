@@ -43,6 +43,20 @@ _CONFAB_RES = [
         r"\b(?:is|are)(?: not|n'?t)[^.]{0,25}\b(?:accessible|available)\b[^.]{0,25}\b(?:workspace|repositor(?:y|ies)|project|director(?:y|ies)|environment)\b",
         r"\b(?:accessible|available) (?:project |current )?(?:workspace|repositor(?:y|ies)|director(?:y|ies))\b",
         r"\b(?:couldn.?t|could not|can.?t|cannot|unable to|was unable to|failed to) (?:locate|find|access|see|open)\b[^.]{0,50}\b(?:repositor(?:y|ies)|project|files?|entry point|codebase|workspace|director(?:y|ies))\b",
+        (
+            r"\bnot (?:exposed|surfaced|visible|mounted|reachable|present)\b[^.]{0,80}"
+            r"\b(?:execution environment|environment|workspace|sandbox|session|context)\b"
+        ),
+        (
+            r"\b(?:path|repositor(?:y|ies)|project|director(?:y|ies)|workspace|files?)\b"
+            r"[^.]{0,60}\b(?:is|are|was|were)(?: not|n'?t) "
+            r"(?:exposed|surfaced|visible|mounted|reachable|present)\b"
+        ),
+        (
+            r"\bI (?:could not|couldn.?t|cannot|can.?t|am unable to|was unable to) (?:safely )?"
+            r"(?:inspect|examine|read|open|list|update|modify|edit|write|create)\b[^.]{0,80}"
+            r"(?:[A-Za-z]:[\\/]|/[\w.-]+/|\brepositor(?:y|ies)\b|\bproject\b|\bworkspace\b|\bfiles?\b)"
+        ),
         r"\bmake (?:the |your )?(?:repositor(?:y|ies)|project|files?|workspace|codebase) available\b",
         r"\bno (?:repositor(?:y|ies)|project|source) files?\b",
         r"\bno main entry point\b",
