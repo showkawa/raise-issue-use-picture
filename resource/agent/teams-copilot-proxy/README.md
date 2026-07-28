@@ -327,7 +327,7 @@ What is recorded:
 - **Tool-planning telemetry:** for every request that carries `tools`, the proxy records `planning_mode` (`single` or, when `M365_TOOL_PLANNING_MODE=router`, `router`), whether the round yielded a tool call, how many attempts/corrections it took, and how often the recovery mechanisms fired — shell-fence/bare-command recovery (`shell_recovered`), in-reply de-duplication (`deduped`), and the ledger's repeated-call / repeated-failure flags. This is stored as additive columns and never changes chat behavior.
 - **OpenCode request shape:** the client's real `x-session-id` and `User-Agent`, the derived `project_path` (from the stated working directory, else the common prefix of the absolute paths in the transcript), `turn_kind` (`tool` / `title` / `summary` / `chat`, so agent turns are not averaged with OpenCode's title side-requests), message count, transcript/system bytes, `context_pct` of `M365_CONTEXT_LIMIT`, sampling parameters, tool count, per-flavour `tool_kinds` (`builtin:8,mcp:3`) and a `tools_fingerprint` for correlating tool-list changes with behaviour changes.
 - **Injected context parts:** which components the proxy actually added to the turn (`tool_protocol`, `system_sanitized`, `transcript`, `transcript_truncated`, `evidence_ledger`, `json_mode`, `router_select`, `correction:<guard>`, …) — recorded per request and per attempt, so a bad turn no longer has to be reverse-engineered from the reply.
-- **Upstream round-trip facts (per attempt):** substrate conversation id and client request id, sent prompt bytes, first-frame latency, frame count, the substrate `messageType`s received, reply bytes, Bing citation count, whether the stream **terminated cleanly**, and the upstream status / close reason when it did not. A truncated turn is now visible directly instead of being inferred from half-parsed JSON.
+- **Upstream round-trip facts (per attempt):** substrate conversation id and client request id, the tone used, sent prompt bytes, the connect / first-content-frame / first-text / last-text timeline, frame and heartbeat counts, the substrate `messageType`s received, reply bytes, Bing citation count, whether the stream **terminated cleanly**, and the upstream status / close reason when it did not. A truncated turn is now visible directly instead of being inferred from half-parsed JSON.
 - **Stream health:** first-chunk latency, chunk count, average interval, and `[DONE]` completeness as aggregates (no per-chunk rows).
 - **Error timeline:** guard hits, throttling, disengagement, and other upstream failures.
 
@@ -383,9 +383,14 @@ Columns marked **(capture)** are content excerpts, only retained per the `M365_M
 | `client_agent` | TEXT | Client `User-Agent` (e.g. `opencode/1.18.5 ...`). Real traffic is distinguishable from test traffic here. |
 | `project_path` | TEXT | Project directory being worked on: the stated working directory, else the common prefix of absolute paths in the transcript. |
 | `turn_kind` | TEXT | `tool`, `title`, `summary` or `chat` — keeps OpenCode's side-requests out of agent-turn metrics. |
+| `turn_index` | INTEGER | 1-based position of this request within its session — for plotting latency and payload against conversation depth. |
 | `messages_count` | INTEGER | Number of messages in the incoming request. |
 | `transcript_bytes` | INTEGER | Byte size of the flattened prior conversation. |
 | `system_bytes` | INTEGER | Byte size of the system prompt received from OpenCode. |
+| `protocol_bytes` | INTEGER | Byte size of the tool-protocol boilerplate (instructions + reminder) re-sent every turn — the share of the payload that is template rather than conversation. |
+| `keepalive_count` | INTEGER | Keepalive comments streamed to OpenCode while the tool round trip was still resolving, i.e. how long the user waited with nothing on screen. |
+| `build` | TEXT | Package version plus short commit of the running proxy; latency is only comparable within one build. |
+| `config_fp` | TEXT | Readable fingerprint of the latency-relevant settings (`plan=`/`tone=`/`transcript=`/`corr=`/`chunk=`/`ka=`/`throttle=`). No secrets. |
 | `context_pct` | REAL | Share of `M365_CONTEXT_LIMIT` consumed by this turn. |
 | `tools_count` | INTEGER | Number of tool definitions sent by the client. |
 | `tool_kinds` | TEXT | Per-flavour breakdown, e.g. `builtin:8,mcp:3`. |
@@ -413,11 +418,15 @@ Primary key `(request_id, seq)`. One row per substrate round trip; a single requ
 | `injections` | TEXT | Context parts injected for this specific attempt (a correction attempt differs from the first). |
 | `conversation_id` | TEXT | Substrate conversation id — for cross-checking against upstream and for session reuse. |
 | `client_request_id` | TEXT | Per-round-trip request id sent to substrate. |
+| `tone` | TEXT | Tone this attempt actually used — the router may run `select` and `answer` on different tones, so the request-level tone is not enough. |
 | `images` | INTEGER | Image annotations attached to this round trip. |
 | `option_sets` | INTEGER | Number of substrate `optionsSets` flags sent (grows by one when images are attached). |
 | `sent_bytes` | INTEGER | Bytes of the prompt the proxy actually sent upstream. |
-| `first_frame_ms` | INTEGER | Latency to the first upstream WebSocket frame. |
-| `frames` | INTEGER | Number of upstream frames received. |
+| `connect_ms` | INTEGER | Time to a usable channel: WebSocket connect plus SignalR handshake, before the prompt goes out. |
+| `first_frame_ms` | INTEGER | Latency to the first upstream **content** frame (SignalR heartbeats excluded — counting them made this measure the handshake). |
+| `first_text_ms` / `last_text_ms` | INTEGER | Latency to the first and last piece of reply text; their difference is generation time as opposed to waiting time. |
+| `frames` | INTEGER | Number of upstream content frames received. |
+| `heartbeats` | INTEGER | Number of SignalR ping frames received. |
 | `message_types` | TEXT | CSV of substrate `messageType`s seen, e.g. `EscapeHatch,Chat,ReferencesListComplete`. |
 | `reply_bytes` | INTEGER | Bytes of assembled reply text. |
 | `citations` | INTEGER | Number of Bing citations in the reply. |

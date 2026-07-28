@@ -343,6 +343,7 @@ class SubstrateCopilotClient:
         turn = TurnTelemetry(
             conversation_id=conv_id,
             client_request_id=req_id,
+            tone=self.tone,
             images=len(annotations or []),
             option_sets=len(_OPTIONS_SETS) + (1 if annotations else 0),
         )
@@ -359,6 +360,7 @@ class SubstrateCopilotClient:
             ) as ws:
                 await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
                 await ws.recv()
+                turn.mark_connected(int((time.perf_counter() - started) * 1000))
                 await ws.send(self._chat_invoke(
                     text, conv_id, session_id, req_id, is_start_of_session, annotations
                 ))
@@ -374,9 +376,11 @@ class SubstrateCopilotClient:
                         except json.JSONDecodeError:
                             continue
                         t = msg.get("type")
-                        turn.mark_frame(int((time.perf_counter() - started) * 1000))
+                        elapsed_ms = int((time.perf_counter() - started) * 1000)
                         if t == 6:
+                            turn.mark_heartbeat()
                             continue
+                        turn.mark_frame(elapsed_ms)
                         if t == 1 and msg.get("target") == "update":
                             args = (msg.get("arguments") or [{}])[0]
                             delta = args.get("writeAtCursor")
@@ -384,6 +388,7 @@ class SubstrateCopilotClient:
                                 if not yielded_any and fallback_text:
                                     yield fallback_text
                                 yielded_any = True
+                                turn.mark_text(elapsed_ms)
                                 turn.reply_bytes += len(delta.encode("utf-8"))
                                 yield delta
                             msgs = args.get("messages")
@@ -406,6 +411,7 @@ class SubstrateCopilotClient:
                         if t == 3:
                             turn.terminated_cleanly = True
                             if not yielded_any and fallback_text:
+                                turn.mark_text(elapsed_ms)
                                 turn.reply_bytes = len(fallback_text.encode("utf-8"))
                                 yield fallback_text
                             return

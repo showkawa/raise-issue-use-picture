@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from importlib import metadata
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -123,6 +125,37 @@ _ROUTER_SELECT_RULES = (
     "only if — no tool is needed to fulfil the request, reply with exactly "
     f"{_NO_TOOL_SIGNAL} and nothing else. Do not write the final answer in this turn."
 )
+
+
+def _build_id() -> str:
+    """Package version plus the short commit it was run from, when the source is
+    a git checkout. Latency numbers are only comparable within one build."""
+    version = metadata.version("teams-copilot-proxy")
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return version
+    return f"{version}+{sha}" if sha else version
+
+
+def _config_fingerprint(settings: Settings) -> str:
+    """The settings that plausibly move latency, in a readable groupable form."""
+    return (
+        f"plan={_normalize_planning_mode(settings.tool_planning_mode)}"
+        f"|tone={settings.default_tone}"
+        f"|transcript={settings.max_transcript_chars}"
+        f"|corr={settings.tool_correction_retries}"
+        f"|chunk={settings.stream_chunk_chars}/{settings.stream_chunk_delay_ms}"
+        f"|ka={settings.stream_keepalive_interval_s}"
+        f"|throttle={settings.throttle_retries}"
+    )
 
 
 def _normalize_planning_mode(raw: str) -> str:
@@ -246,7 +279,10 @@ def create_app(
                 resolved_settings.monitor_retention_days,
             )
             app.state.monitor = MonitorBus(
-                sink, capture=resolved_settings.monitor_capture
+                sink,
+                capture=resolved_settings.monitor_capture,
+                build=_build_id(),
+                config_fp=_config_fingerprint(resolved_settings),
             )
         except Exception:
             logger.exception("Monitor init failed; running without monitoring.")
@@ -773,6 +809,7 @@ def _record_request_shape(
         messages_count=len(request.messages),
         transcript_bytes=transcript_bytes,
         system_bytes=system_bytes,
+        protocol_bytes=translated.protocol_bytes,
         tools_count=len(translated.tools or []),
         tool_kinds=tool_kinds(translated.tools),
         tools_fingerprint=tools_fingerprint(translated.tools),
@@ -1141,6 +1178,7 @@ async def _openai_stream_with_tools(
                     done, _ = await asyncio.wait({resolve_task}, timeout=keepalive_interval)
                     if done:
                         break
+                    recorder.add_keepalive()
                     yield ": keepalive\n\n"
             outcome = await resolve_task
         except SubstrateCopilotError as exc:

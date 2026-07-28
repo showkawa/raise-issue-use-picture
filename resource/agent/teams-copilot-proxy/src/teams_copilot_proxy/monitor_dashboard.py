@@ -198,17 +198,23 @@ async function showDetail(id) {
   const box = document.getElementById('detail');
   let html = `<b>${esc(d.id)}</b> — ${esc(d.status)}${d.guard ? ' / ' + esc(d.guard) : ''}`
     + `${d.error ? '<pre>' + esc(d.error) + '</pre>' : ''}`;
-  html += '<h2>Request shape</h2><table><tr><th>project</th><th>turn</th><th>client</th>'
-    + '<th>msgs</th><th>transcript B</th><th>system B</th><th>ctx%</th><th>tools</th>'
+  html += '<h2>Request shape</h2><table><tr><th>project</th><th>turn</th><th>#turn</th><th>client</th>'
+    + '<th>msgs</th><th>transcript B</th><th>system B</th><th>protocol B</th>'
+    + '<th>ctx%</th><th>tools</th>'
     + '<th>tool kinds</th><th>tools fp</th><th>temp</th><th>top_p</th><th>max tok</th>'
-    + '<th>resp fmt</th><th>injections</th></tr>'
+    + '<th>resp fmt</th><th>keepalives</th><th>build</th><th>config</th>'
+    + '<th>injections</th></tr>'
     + `<tr><td>${esc(d.project_path || '')}</td><td>${esc(d.turn_kind || '')}</td>`
+    + `<td>${d.turn_index ?? ''}</td>`
     + `<td>${esc(d.client_agent || '')}</td><td>${d.messages_count ?? ''}</td>`
     + `<td>${d.transcript_bytes ?? ''}</td><td>${d.system_bytes ?? ''}</td>`
+    + `<td>${d.protocol_bytes ?? ''}</td>`
     + `<td>${pct(d.context_pct)}</td><td>${d.tools_count ?? ''}</td>`
     + `<td>${esc(d.tool_kinds || '')}</td><td>${esc(d.tools_fingerprint || '')}</td>`
     + `<td>${d.temperature ?? ''}</td><td>${d.top_p ?? ''}</td><td>${d.max_tokens ?? ''}</td>`
-    + `<td>${esc(d.response_format || '')}</td><td>${esc(d.injections || '')}</td></tr></table>`;
+    + `<td>${esc(d.response_format || '')}</td><td>${d.keepalive_count ?? ''}</td>`
+    + `<td>${esc(d.build || '')}</td><td>${esc(d.config_fp || '')}</td>`
+    + `<td>${esc(d.injections || '')}</td></tr></table>`;
   if (d.prompt_summary) html += '<h2>Prompt excerpt</h2><pre>' + esc(d.prompt_summary) + '</pre>';
   if (d.reply_snippet) html += '<h2>Reply excerpt</h2><pre>' + esc(d.reply_snippet) + '</pre>';
   html += '<h2>Attempt chain</h2><table><tr><th>#</th><th>ms</th><th>phase</th><th>guard</th><th>retried</th><th>status</th><th>why</th><th>text</th></tr>'
@@ -219,16 +225,20 @@ async function showDetail(id) {
       + `<td>${a.text ? '<pre>' + esc(a.text) + '</pre>' : '<span class="muted">not captured</span>'}</td></tr>`
     ).join('') + '</table>';
   html += '<h2>Upstream (M365)</h2><table><tr><th>#</th><th>conversation</th><th>req id</th>'
-    + '<th>imgs</th><th>optsets</th>'
-    + '<th>sent B</th><th>1st frame ms</th><th>frames</th><th>msg types</th>'
+    + '<th>tone</th><th>imgs</th><th>optsets</th>'
+    + '<th>sent B</th><th>connect ms</th><th>1st frame ms</th><th>1st text ms</th>'
+    + '<th>gen ms</th><th>frames</th><th>hb</th><th>msg types</th>'
     + '<th>reply B</th><th>cites</th><th>clean end</th><th>status</th><th>close</th>'
     + '<th>injections</th></tr>'
     + d.attempts.map(a =>
       `<tr><td>${a.seq}</td><td>${esc((a.conversation_id || '').slice(0, 12))}</td>`
       + `<td>${esc((a.client_request_id || '').slice(0, 8))}</td>`
+      + `<td>${esc(a.tone || '')}</td>`
       + `<td>${a.images ?? ''}</td><td>${a.option_sets ?? ''}</td>`
-      + `<td>${a.sent_bytes ?? ''}</td>`
-      + `<td>${a.first_frame_ms ?? ''}</td><td>${a.frames ?? ''}</td>`
+      + `<td>${a.sent_bytes ?? ''}</td><td>${a.connect_ms ?? ''}</td>`
+      + `<td>${a.first_frame_ms ?? ''}</td><td>${a.first_text_ms ?? ''}</td>`
+      + `<td>${a.last_text_ms != null && a.first_text_ms != null ? a.last_text_ms - a.first_text_ms : ''}</td>`
+      + `<td>${a.frames ?? ''}</td><td>${a.heartbeats ?? ''}</td>`
       + `<td>${esc(a.message_types || '')}</td><td>${a.reply_bytes ?? ''}</td>`
       + `<td>${a.citations ?? ''}</td>`
       + `<td class="${a.terminated_cleanly === 0 ? 'error' : ''}">${a.terminated_cleanly == null ? '' : (a.terminated_cleanly ? 'yes' : 'NO')}</td>`

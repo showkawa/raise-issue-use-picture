@@ -23,11 +23,16 @@ _TAIL_LIMIT = 2048
 class TurnTelemetry:
     conversation_id: str = ""
     client_request_id: str = ""
+    tone: str = ""
     images: int = 0
     option_sets: int = 0
     sent_bytes: int = 0
+    connect_ms: int | None = None
     first_frame_ms: int | None = None
+    first_text_ms: int | None = None
+    last_text_ms: int | None = None
     frames: int = 0
+    heartbeats: int = 0
     message_types: list[str] = field(default_factory=list)
     reply_bytes: int = 0
     citations: int = 0
@@ -48,10 +53,28 @@ class TurnTelemetry:
         self.sent_head = text[:_HEAD_LIMIT]
         self.sent_tail = text[-_TAIL_LIMIT:] if len(text) > _HEAD_LIMIT else None
 
+    def mark_connected(self, elapsed_ms: int) -> None:
+        """Time to a usable channel: TCP/TLS, the WebSocket upgrade and the
+        SignalR handshake, i.e. everything spent before the prompt goes out."""
+        self.connect_ms = elapsed_ms
+
+    def mark_heartbeat(self) -> None:
+        self.heartbeats += 1
+
     def mark_frame(self, elapsed_ms: int) -> None:
+        """Record one content frame. Heartbeats are excluded on purpose: counting
+        them made ``first_frame_ms`` measure the SignalR ping rather than the
+        upstream's first real output."""
         self.frames += 1
         if self.first_frame_ms is None:
             self.first_frame_ms = elapsed_ms
+
+    def mark_text(self, elapsed_ms: int) -> None:
+        """Record reply text reaching the proxy; the span between the first and
+        last one is generation time, as opposed to time spent waiting for it."""
+        if self.first_text_ms is None:
+            self.first_text_ms = elapsed_ms
+        self.last_text_ms = elapsed_ms
 
     def mark_message(self, entry: dict) -> None:
         """Record one non-user substrate message: its type, citations and body.

@@ -6,6 +6,7 @@ Seam：FastAPI app + fake substrate client + TestClient——发真实的
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 
@@ -781,11 +782,16 @@ def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
             "injections",
             "conversation_id",
             "client_request_id",
+            "tone",
             "images",
             "option_sets",
             "sent_bytes",
+            "connect_ms",
             "first_frame_ms",
+            "first_text_ms",
+            "last_text_ms",
             "frames",
+            "heartbeats",
             "message_types",
             "reply_bytes",
             "citations",
@@ -801,9 +807,14 @@ def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
             "client_agent",
             "project_path",
             "turn_kind",
+            "turn_index",
             "messages_count",
             "transcript_bytes",
             "system_bytes",
+            "protocol_bytes",
+            "keepalive_count",
+            "build",
+            "config_fp",
             "context_pct",
             "tools_count",
             "tool_kinds",
@@ -830,8 +841,13 @@ class TelemetryCopilotClient(FakeCopilotClient):
         turn = TurnTelemetry(
             conversation_id="conv-123",
             client_request_id="req-abc",
+            tone="Gpt_5_5_Chat",
             frames=4,
+            heartbeats=3,
+            connect_ms=120,
             first_frame_ms=250,
+            first_text_ms=400,
+            last_text_ms=900,
             reply_bytes=13,
             citations=2,
             terminated_cleanly=True,
@@ -919,6 +935,60 @@ def test_attempt_records_upstream_turn_facts(tmp_path) -> None:
     assert attempt["sent_bytes"] == 3000
     assert attempt["images"] == 1
     assert attempt["option_sets"] == 7
+    assert attempt["tone"] == "Gpt_5_5_Chat"
+    assert attempt["heartbeats"] == 3
+    assert attempt["connect_ms"] == 120
+    assert attempt["first_text_ms"] == 400
+    assert attempt["last_text_ms"] == 900
+
+
+def test_request_records_payload_breakdown_build_and_turn_index(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY, GOOD_TOOL_REPLY]), tmp_path
+    )
+    opencode_chat(client)
+    opencode_chat(client)
+
+    requests = client.get("/monitor/api/requests", headers=AUTH).json()["requests"]
+    assert [r["turn_index"] for r in requests] == [2, 1]
+    entry = client.get(
+        f"/monitor/api/requests/{requests[0]['id']}", headers=AUTH
+    ).json()
+    assert entry["protocol_bytes"] > 0
+    assert entry["keepalive_count"] == 0
+    assert entry["build"]
+    assert "plan=" in entry["config_fp"]
+
+
+def test_request_counts_keepalives_sent_while_resolving_tools(tmp_path) -> None:
+    class SlowToolClient(FakeCopilotClient):
+        async def chat(
+            self,
+            prompt: str,
+            additional_context: list[str],
+            session: object | None = None,
+        ) -> str:
+            await asyncio.sleep(0.1)
+            return GOOD_TOOL_REPLY
+
+    client = build_monitor_client(
+        SlowToolClient(), tmp_path, M365_STREAM_KEEPALIVE_INTERVAL_S=0.01
+    )
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "Read main.py"}],
+            "tools": SAMPLE_TOOLS,
+            "stream": True,
+        },
+    ) as response:
+        payload = "".join(response.iter_text())
+    assert ": keepalive" in payload
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["keepalive_count"] >= 1
 
 
 def test_upstream_prompt_capture_is_gated_by_capture_mode(tmp_path) -> None:

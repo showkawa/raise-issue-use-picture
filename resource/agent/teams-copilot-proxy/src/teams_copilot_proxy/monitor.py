@@ -118,11 +118,19 @@ class AttemptRecord:
     # proxy → M365 与 M365 → proxy 的往返事实（来自 TurnTelemetry）。
     conversation_id: str | None = None
     client_request_id: str | None = None
+    # Tone lives on the attempt as well as the request: the router may run its
+    # select and answer phases on different tones.
+    tone: str | None = None
     images: int | None = None
     option_sets: int | None = None
     sent_bytes: int | None = None
+    # 上游时间线：连接就绪 → 第一个内容帧 → 第一段/最后一段回复文本。
+    connect_ms: int | None = None
     first_frame_ms: int | None = None
+    first_text_ms: int | None = None
+    last_text_ms: int | None = None
     frames: int | None = None
+    heartbeats: int | None = None
     message_types: str | None = None
     reply_bytes: int | None = None
     citations: int | None = None
@@ -139,11 +147,16 @@ class AttemptRecord:
         """Copy one substrate round trip's facts onto this attempt."""
         self.conversation_id = turn.conversation_id or None
         self.client_request_id = turn.client_request_id or None
+        self.tone = turn.tone or None
         self.images = turn.images
         self.option_sets = turn.option_sets
         self.sent_bytes = turn.sent_bytes
+        self.connect_ms = turn.connect_ms
         self.first_frame_ms = turn.first_frame_ms
+        self.first_text_ms = turn.first_text_ms
+        self.last_text_ms = turn.last_text_ms
         self.frames = turn.frames
+        self.heartbeats = turn.heartbeats
         self.message_types = turn.types_csv()
         self.reply_bytes = turn.reply_bytes
         self.citations = turn.citations
@@ -217,9 +230,19 @@ class RequestRecord:
     client_agent: str | None = None
     project_path: str | None = None
     turn_kind: str | None = None
+    # 同一 session_key 内的第几轮（落库时算出），用于「轮次 vs 耗时/负载」曲线。
+    turn_index: int | None = None
     messages_count: int = 0
     transcript_bytes: int = 0
     system_bytes: int = 0
+    # 每轮重复发给上游的工具协议模板大小；与 transcript_bytes 一起说明 sent_bytes
+    # 里有多少是可裁剪的。
+    protocol_bytes: int = 0
+    # 流式等待期间发给 OpenCode 的 keepalive 数：用户干等了几个心跳间隔。
+    keepalive_count: int = 0
+    # 构建与关键配置指纹，跨版本比较耗时时用来分组。
+    build: str | None = None
+    config_fp: str | None = None
     context_pct: float | None = None
     tools_count: int = 0
     tool_kinds: str | None = None
@@ -272,6 +295,8 @@ class RequestRecorder:
             tone=tone,
             stream=stream,
             reasoning_effort=reasoning_effort,
+            build=bus.build,
+            config_fp=bus.config_fp,
         )
 
     def set_phase(self, phase: str | None) -> None:
@@ -293,6 +318,7 @@ class RequestRecorder:
         messages_count: int = 0,
         transcript_bytes: int = 0,
         system_bytes: int = 0,
+        protocol_bytes: int = 0,
         context_pct: float | None = None,
         tools_count: int = 0,
         tool_kinds: str | None = None,
@@ -312,6 +338,7 @@ class RequestRecorder:
             rec.messages_count = messages_count
             rec.transcript_bytes = transcript_bytes
             rec.system_bytes = system_bytes
+            rec.protocol_bytes = protocol_bytes
             rec.context_pct = context_pct
             rec.tools_count = tools_count
             rec.tool_kinds = tool_kinds
@@ -333,6 +360,10 @@ class RequestRecorder:
     def set_context_pct(self, pct: float) -> None:
         """记录 prompt 估算 token 占 M365 上下文上限的比例。"""
         self.record.context_pct = round(pct, 4)
+
+    def add_keepalive(self) -> None:
+        """流式等待期间又向 OpenCode 发了一个 keepalive（用户仍未看到任何内容）。"""
+        self.record.keepalive_count += 1
 
     def add_injection(self, *names: str) -> None:
         """追加本请求（及后续 attempt）实际注入的上下文部件名。"""
@@ -547,6 +578,9 @@ class _NullRecorder:
     def set_context_pct(self, pct: float) -> None:
         return None
 
+    def add_keepalive(self) -> None:
+        return None
+
     def add_injection(self, *names: str) -> None:
         return None
 
@@ -627,9 +661,14 @@ class SQLiteSink:
                     client_agent TEXT,
                     project_path TEXT,
                     turn_kind TEXT,
+                    turn_index INTEGER,
                     messages_count INTEGER,
                     transcript_bytes INTEGER,
                     system_bytes INTEGER,
+                    protocol_bytes INTEGER,
+                    keepalive_count INTEGER,
+                    build TEXT,
+                    config_fp TEXT,
                     context_pct REAL,
                     tools_count INTEGER,
                     tool_kinds TEXT,
@@ -688,11 +727,16 @@ class SQLiteSink:
                     injections TEXT,
                     conversation_id TEXT,
                     client_request_id TEXT,
+                    tone TEXT,
                     images INTEGER,
                     option_sets INTEGER,
                     sent_bytes INTEGER,
+                    connect_ms INTEGER,
                     first_frame_ms INTEGER,
+                    first_text_ms INTEGER,
+                    last_text_ms INTEGER,
                     frames INTEGER,
+                    heartbeats INTEGER,
                     message_types TEXT,
                     reply_bytes INTEGER,
                     citations INTEGER,
@@ -739,9 +783,14 @@ class SQLiteSink:
                 "client_agent": "TEXT",
                 "project_path": "TEXT",
                 "turn_kind": "TEXT",
+                "turn_index": "INTEGER",
                 "messages_count": "INTEGER",
                 "transcript_bytes": "INTEGER",
                 "system_bytes": "INTEGER",
+                "protocol_bytes": "INTEGER",
+                "keepalive_count": "INTEGER",
+                "build": "TEXT",
+                "config_fp": "TEXT",
                 "context_pct": "REAL",
                 "tools_count": "INTEGER",
                 "tool_kinds": "TEXT",
@@ -762,11 +811,16 @@ class SQLiteSink:
                 "injections": "TEXT",
                 "conversation_id": "TEXT",
                 "client_request_id": "TEXT",
+                "tone": "TEXT",
                 "images": "INTEGER",
                 "option_sets": "INTEGER",
                 "sent_bytes": "INTEGER",
+                "connect_ms": "INTEGER",
                 "first_frame_ms": "INTEGER",
+                "first_text_ms": "INTEGER",
+                "last_text_ms": "INTEGER",
                 "frames": "INTEGER",
+                "heartbeats": "INTEGER",
                 "message_types": "TEXT",
                 "reply_bytes": "INTEGER",
                 "citations": "INTEGER",
@@ -802,6 +856,7 @@ class SQLiteSink:
 
     def write(self, rec: RequestRecord) -> None:
         with self._lock, self._conn:
+            rec.turn_index = self._next_turn_index(rec)
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO requests (
@@ -812,13 +867,15 @@ class SQLiteSink:
                     stream_complete, had_tools, planning_mode, reasoning_effort,
                     shell_recovered, deduped, repeated_call, repeated_failure,
                     client_session_id, client_agent, project_path, turn_kind,
-                    messages_count, transcript_bytes, system_bytes, context_pct,
+                    turn_index, messages_count, transcript_bytes, system_bytes,
+                    protocol_bytes, keepalive_count, build, config_fp,
+                    context_pct,
                     tools_count, tool_kinds, tools_fingerprint, temperature,
                     top_p, max_tokens, response_format, injections,
                     request_body
                 ) VALUES (
                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )
                 """,
                 (
@@ -853,9 +910,14 @@ class SQLiteSink:
                     rec.client_agent,
                     rec.project_path,
                     rec.turn_kind,
+                    rec.turn_index,
                     rec.messages_count,
                     rec.transcript_bytes,
                     rec.system_bytes,
+                    rec.protocol_bytes,
+                    rec.keepalive_count,
+                    rec.build,
+                    rec.config_fp,
                     rec.context_pct,
                     rec.tools_count,
                     rec.tool_kinds,
@@ -897,20 +959,26 @@ class SQLiteSink:
                     INSERT OR REPLACE INTO attempts (
                         request_id, seq, duration_ms, guard, retried, status,
                         text, error_detail, phase, injections, conversation_id,
-                        client_request_id, images, option_sets, sent_bytes,
-                        first_frame_ms, frames,
+                        client_request_id, tone, images, option_sets, sent_bytes,
+                        connect_ms, first_frame_ms, first_text_ms, last_text_ms,
+                        frames, heartbeats,
                         message_types, reply_bytes, citations, terminated_cleanly,
                         upstream_status, close_reason, final_frame, sent_head,
                         sent_tail, response_text
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (
+                        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                        ?,?,?,?,?
+                    )
                     """,
                     (
                         rec.id, a.seq, a.duration_ms, a.guard,
                         1 if a.retried else 0, a.status, a.text,
                         a.error_detail, a.phase, a.injections, a.conversation_id,
-                        a.client_request_id, a.images, a.option_sets,
-                        a.sent_bytes, a.first_frame_ms,
-                        a.frames, a.message_types, a.reply_bytes, a.citations,
+                        a.client_request_id, a.tone, a.images, a.option_sets,
+                        a.sent_bytes, a.connect_ms, a.first_frame_ms,
+                        a.first_text_ms, a.last_text_ms,
+                        a.frames, a.heartbeats,
+                        a.message_types, a.reply_bytes, a.citations,
                         _flag(a.terminated_cleanly), a.upstream_status,
                         a.close_reason, a.final_frame, a.sent_head, a.sent_tail,
                         a.response_text,
@@ -919,6 +987,17 @@ class SQLiteSink:
         self._writes += 1
         if self._writes % 50 == 0:
             self.cleanup()
+
+    def _next_turn_index(self, rec: RequestRecord) -> int | None:
+        """1-based position of this request within its OpenCode session, so that
+        payload growth and latency can be plotted against conversation depth."""
+        if not rec.session_key:
+            return None
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE session_key = ? AND id != ?",
+            (rec.session_key, rec.id),
+        ).fetchone()
+        return int(row[0]) + 1
 
     def _close_tool_call(self, rec: RequestRecord, result: ToolResultRecord) -> None:
         """把工具结果配对回未闭环的 tool_call：优先 call_id，其次同会话同名最早一条；
@@ -1400,9 +1479,15 @@ class MonitorBus:
         *,
         capture: str = CAPTURE_FAILURES,
         capacity: int = 1000,
+        build: str | None = None,
+        config_fp: str | None = None,
     ) -> None:
         self.sink = sink
         self.capture = capture if capture in _VALID_CAPTURE else CAPTURE_FAILURES
+        # Stamped onto every request so latency can be grouped by the code and
+        # configuration that produced it instead of comparing across versions.
+        self.build = build
+        self.config_fp = config_fp
         self._q: queue.Queue = queue.Queue(maxsize=capacity)
         self._dropped = 0
         self._last_warn = 0.0

@@ -274,10 +274,11 @@ def translate_openai_request(
             "have seen them; ask for a text description if you need one."
         )
         injections.append("image_urls_dropped")
+    protocol_bytes = 0
     if tools:
-        additional_context.append(
-            render_tool_instructions(tools, allow_parallel_tool_calls)
-        )
+        instructions = render_tool_instructions(tools, allow_parallel_tool_calls)
+        additional_context.append(instructions)
+        protocol_bytes += len(instructions.encode("utf-8"))
         injections.append("tool_protocol")
     kept_lines = _truncate_transcript(transcript_lines, max_transcript_chars)
     if len(kept_lines) < len(transcript_lines):
@@ -292,7 +293,9 @@ def translate_openai_request(
         additional_context.append(json_instruction)
         injections.append("json_mode")
     if tools:
-        prompt = f"{prompt}{tool_reminder(tools, allow_parallel_tool_calls)}"
+        reminder = tool_reminder(tools, allow_parallel_tool_calls)
+        prompt = f"{prompt}{reminder}"
+        protocol_bytes += len(reminder.encode("utf-8"))
         injections.append("tool_reminder")
     if images:
         injections.append(f"images:{len(images)}")
@@ -304,5 +307,6 @@ def translate_openai_request(
         sampling=sampling,
         tools=tools,
         injections=injections,
+        protocol_bytes=protocol_bytes,
     )
 
