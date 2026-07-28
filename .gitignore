@@ -7,4 +7,4 @@ output/
 /**/docs/
 /**/issues/
 .probe_cache.json
-!resource/agent/teams-copilot-proxy/docs/
+/**/opencode.json
