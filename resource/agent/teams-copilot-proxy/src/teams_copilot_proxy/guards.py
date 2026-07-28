@@ -97,7 +97,18 @@ def detect_hallucinated_completion(text: str) -> bool:
     return any(pattern.search(text) for pattern in _HALLUCINATED_RES)
 
 
-def guard_retry_prompt(guard: str) -> str:
+_FINAL_ATTEMPT_CLAUSE = (
+    " This is your final attempt: your previous reply was rejected and will not be "
+    "shown to the user, so restate nothing from it. Any reply that is not a single "
+    "fenced tool_call block fails the turn."
+)
+
+
+def guard_retry_prompt(guard: str, *, strict: bool = False) -> str:
+    return _guard_retry_prompt(guard) + (_FINAL_ATTEMPT_CLAUSE if strict else "")
+
+
+def _guard_retry_prompt(guard: str) -> str:
     if guard == HOSTED_FILE_LINK:
         return (
             "You produced a hosted/server-side file link instead of writing the file "

@@ -2586,6 +2586,82 @@ def test_router_mode_makes_a_second_turn_for_the_answer() -> None:
     assert not any("TOOL-SELECTION TURN" in part for part in fake.calls[1][1])
 
 
+def test_router_answer_turn_refusal_is_guarded_and_recovered() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            "NO_TOOL_NEEDED",
+            (
+                "I couldn't complete the investigation: the repository is not "
+                "exposed to the available filesystem tools. No files were modified."
+            ),
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Investigate the repository"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert len(fake.calls) == 3
+    assert "no sandbox" in fake.calls[2][0]
+
+
+def test_router_answer_turn_passes_normal_prose_through() -> None:
+    fake = ToolCallingCopilotClient(
+        ["NO_TOOL_NEEDED", "The tests pass and nothing needs changing."]
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Any changes needed?"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "The tests pass and nothing needs changing."
+    assert len(fake.calls) == 2
+
+
+def test_final_confabulation_retry_drops_the_quoted_refusal() -> None:
+    refusal = "I cannot access your local files. Please paste the file content."
+    fake = ToolCallingCopilotClient(
+        [
+            refusal,
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    retry_prompt, retry_context = fake.calls[1]
+    assert "This is your final attempt" in retry_prompt
+    assert not any(refusal in part for part in retry_context)
+    assert any("Original request:" in part for part in retry_context)
+
+
 def test_router_mode_repairs_malformed_selection() -> None:
     fake = ToolCallingCopilotClient(
         [
