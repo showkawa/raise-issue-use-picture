@@ -807,6 +807,17 @@ def test_confabulation_detects_sandbox_and_mount_hallucination() -> None:
     assert detect_confabulation(
         "The project directory is not mounted, so I stopped without changes."
     )
+    # Subagent final report captured live: a confabulated refusal preamble that
+    # previously slipped past the guard and polluted the parent task result.
+    subagent_refusal = (
+        "I could not complete the requested repository-wide verification because "
+        "the Windows workspace referenced in the transcript was not available to "
+        "the active filesystem tools in this turn."
+    )
+    assert detect_confabulation(subagent_refusal)
+    assert detect_confabulation(
+        "That path is not accessible to the available tools, so nothing was read."
+    )
     # A normal reply that merely mentions files must not trip the guard.
     assert not detect_confabulation("I will attach the generated report to the PR.")
     assert not detect_confabulation("The program prints 'hello' and then exits.")
