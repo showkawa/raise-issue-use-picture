@@ -1,5 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "model": "teams-copilot/gpt-5-6-reasoning",
+  "small_model": "teams-copilot/gpt-5-5-chat",
   "provider": {
     "teams-copilot": {
       "npm": "@ai-sdk/openai-compatible",
@@ -9,13 +11,53 @@
         "apiKey": "unused"
       },
       "models": {
-        "m365-copilot": {
-          "name": "M365 Copilot",
+        "claude-sonnet": {
+          "name": "Copilot (Claude Sonnet)",
           "tool_call": true,
           "reasoning": false,
           "attachment": false,
           "limit": {
-            "context": 128000,
+            "context": 265000,
+            "output": 8192
+          }
+        },
+        "claude-sonnet-reasoning": {
+          "name": "Copilot (Claude Sonnet Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "limit": {
+            "context": 265000,
+            "output": 8192
+          }
+        },
+        "gpt-5-5-chat": {
+          "name": "Copilot (GPT-5.5 Chat)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true,
+          "limit": {
+            "context": 265000,
+            "output": 8192
+          }
+        },
+        "gpt-5-5-reasoning": {
+          "name": "Copilot (GPT-5.5 Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true,
+          "limit": {
+            "context": 265000,
+            "output": 8192
+          }
+        },
+        "gpt-5-6-reasoning": {
+          "name": "Copilot (GPT-5.6 Reasoning)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true,
+          "limit": {
+            "context": 265000,
             "output": 8192
           }
         }

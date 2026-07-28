@@ -2,6 +2,11 @@
 
 The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admin consent is blocked, so tokens cannot be obtained programmatically via MSAL device code flow. Browser automation is required.
 
+> Note: once a valid token is available, the server also runs a startup capability probe
+> (tone tests + fenced tool probe, see `M365_STARTUP_PROBE` in the README). This happens after
+> token capture/refresh and adds some startup time roughly once per 24h (cached in
+> `.probe_cache.json`).
+
 ## Current manual flow
 
 ```bat

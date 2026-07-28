@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,18 @@ import uvicorn
 import websockets
 
 from .app import create_app
+from .oauth_pkce import (
+    OAuthConfig,
+    OAuthError,
+    TokenCache,
+    build_authorization_url,
+    ensure_valid_token,
+    exchange_code,
+    generate_pkce_verifier,
+    parse_redirect_code,
+    poll_device_code,
+    start_device_code,
+)
 from .token_store import decode_jwt_payload, is_substrate_token_claims
 
 
@@ -188,6 +201,8 @@ def _needs_substrate_token(token: str | None) -> bool:
 
 
 def _startup_capture_loop(cdp_port: int, timeout_seconds: int) -> None:
+    if _try_oauth_refresh():
+        return
     print("Waiting for the debug Chrome M365 tab...")
     _wait_for_m365_page(cdp_port, min(timeout_seconds, 30))
     print("Trying to refresh Substrate token from the debug Chrome tab...")
@@ -302,8 +317,11 @@ def _auto_refresh_loop(
             stop_event.wait(wait_seconds)
             continue
 
-        print(f"Token expires in {max(remaining, 0)} seconds; refreshing from Chrome...")
-        if not _try_auto_refresh(cdp_port):
+        print(f"Token expires in {max(remaining, 0)} seconds; refreshing...")
+        if (
+            not _try_oauth_refresh(skew_seconds=refresh_before_seconds)
+            and not _try_auto_refresh(cdp_port)
+        ):
             print("Auto-refresh failed; will retry later.")
         stop_event.wait(retry_seconds)
 
@@ -322,11 +340,107 @@ def _write_token(token: str) -> None:
     env_path.write_text(text, encoding="utf-8")
 
 
+def _oauth_config_and_cache() -> tuple[OAuthConfig, TokenCache]:
+    # Import here to avoid a config <-> cli import cycle at module load.
+    from .config import Settings
+
+    settings = Settings()
+    config = OAuthConfig(
+        client_id=settings.oauth_client_id,
+        authority=settings.oauth_authority,
+        scope=settings.oauth_scope,
+        redirect_uri=settings.oauth_redirect_uri,
+    )
+    return config, TokenCache(settings.oauth_cache_path)
+
+
+def _try_oauth_refresh(*, skew_seconds: int = 60) -> bool:
+    """Publish a valid substrate token from the OAuth cache (browserless).
+
+    Only spends the refresh_token when the cached access_token expires within
+    ``skew_seconds``; otherwise the cached one is republished as-is.
+    """
+
+    config, cache = _oauth_config_and_cache()
+    previous = cache.load()
+    try:
+        token_set = ensure_valid_token(config, cache, skew_seconds=skew_seconds)
+    except OAuthError as exc:
+        if exc.error != "no_cached_token":
+            print(f"OAuth refresh failed: {exc}")
+        return False
+    _write_token(token_set.access_token)
+    if previous is not None and token_set.access_token == previous.access_token:
+        print("Cached OAuth access token still valid; reused.")
+    else:
+        print("Token refreshed via OAuth refresh_token.")
+    return True
+
+
+def login_command(_args) -> None:
+    config, cache = _oauth_config_and_cache()
+    verifier = generate_pkce_verifier()
+    url = build_authorization_url(config, verifier)
+    print("Open this URL in a signed-in browser and complete sign-in:\n")
+    print(url + "\n")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    print("After sign-in you land on a blank 'nativeclient' page. Copy its full URL")
+    print("(the address bar contains ?code=...) and paste it here, then press Enter:")
+    redirect = input().strip()
+    try:
+        code = parse_redirect_code(redirect)
+        token_set = exchange_code(config, code, verifier)
+    except OAuthError as exc:
+        print(f"Login failed: {exc}")
+        return
+    cache.save(token_set)
+    _write_token(token_set.access_token)
+    account = token_set.account.get("email") or token_set.account.get("oid") or "unknown account"
+    print(
+        f"Signed in as {account}. Token cached to {cache.path} and .env updated "
+        f"(access token expires in {token_set.seconds_remaining()}s)."
+    )
+
+
+def login_device_command(_args) -> None:
+    config, cache = _oauth_config_and_cache()
+    try:
+        device = start_device_code(config)
+    except OAuthError as exc:
+        print(f"Device-code start failed: {exc}")
+        return
+    message = device.get("message") or (
+        f"Go to {device.get('verification_uri')} and enter code {device.get('user_code')}"
+    )
+    print(message)
+    print("Waiting for you to complete sign-in...")
+    try:
+        token_set = poll_device_code(config, device)
+    except OAuthError as exc:
+        print(f"Device-code sign-in failed: {exc}")
+        return
+    cache.save(token_set)
+    _write_token(token_set.access_token)
+    account = token_set.account.get("email") or token_set.account.get("oid") or "unknown account"
+    print(f"Signed in as {account}. Token cached to {cache.path} and .env updated.")
+
+
+def oauth_refresh_command(_args) -> None:
+    if not _try_oauth_refresh():
+        print("No cached refresh_token. Run `login` or `login-device` first.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="teams-copilot-proxy")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("set-token").set_defaults(func=set_token_command)
+    subparsers.add_parser("login").set_defaults(func=login_command)
+    subparsers.add_parser("login-device").set_defaults(func=login_device_command)
+    subparsers.add_parser("oauth-refresh").set_defaults(func=oauth_refresh_command)
     capture_parser = subparsers.add_parser("capture-token")
     capture_parser.add_argument("--cdp-port", type=int, default=9222)
     capture_parser.add_argument("--timeout-seconds", type=int, default=60)
@@ -421,6 +535,10 @@ def capture_token_command(args: argparse.Namespace) -> None:
 def serve_command(args: argparse.Namespace) -> None:
     cdp_port: int = args.cdp_port
     while True:
+        if not args.no_auto_refresh:
+            # Eager browserless refresh: boot on the freshest substrate token
+            # whenever a cached OAuth refresh_token is available.
+            _try_oauth_refresh()
         app = create_app()
         config = uvicorn.Config(app, host=args.host, port=args.port)
         server = uvicorn.Server(config)
@@ -486,7 +604,7 @@ def serve_command(args: argparse.Namespace) -> None:
 
         if action == "refresh":
             print("Refreshing token...")
-            if not _try_auto_refresh(cdp_port):
+            if not _try_oauth_refresh() and not _try_auto_refresh(cdp_port):
                 print("Auto-refresh failed (Chrome not running with --remote-debugging-port).")
                 print("Falling back to manual mode.")
                 set_token_command(None)

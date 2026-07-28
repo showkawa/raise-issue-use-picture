@@ -1,0 +1,1035 @@
+"""Monitor（阶段二·工单 01）的端到端测试。
+
+Seam：FastAPI app + fake substrate client + TestClient——发真实的
+/v1/chat/completions 请求，然后断言 /monitor/api/* 的对外行为。
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import AsyncIterator
+
+from fastapi.testclient import TestClient
+
+from teams_copilot_proxy.app import create_app
+from teams_copilot_proxy.config import Settings
+from teams_copilot_proxy.guards import TOOL_PARSE_FAILURE
+from teams_copilot_proxy.monitor import RequestRecord, SQLiteSink
+from teams_copilot_proxy.substrate_client import (
+    SubstrateCopilotError,
+    SubstrateThrottledError,
+)
+from teams_copilot_proxy.telemetry import TurnTelemetry
+
+AUTH = {"Authorization": "Bearer fake-token"}
+
+SAMPLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {"filePath": {"type": "string"}},
+            },
+        },
+    }
+]
+
+
+class FakeCopilotClient:
+    async def chat(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> str:
+        return "copilot reply"
+
+    async def chat_stream(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> AsyncIterator[str]:
+        yield "hello"
+        yield " world"
+
+
+class ScriptedCopilotClient(FakeCopilotClient):
+    def __init__(self, replies: list[str]):
+        self.replies = list(replies)
+
+    async def chat(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> str:
+        return self.replies.pop(0)
+
+
+class ErrorCopilotClient(FakeCopilotClient):
+    async def chat(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> str:
+        raise SubstrateCopilotError("substrate exploded")
+
+
+def build_monitor_client(
+    fake: FakeCopilotClient,
+    tmp_path,
+    client_addr: tuple[str, int] | None = None,
+    **overrides,
+) -> TestClient:
+    kwargs = {
+        "M365_ACCESS_TOKEN": "fake-token",
+        "M365_MONITOR_DB_PATH": str(tmp_path / "monitor.db"),
+    }
+    kwargs.update(overrides)
+    settings = Settings(**kwargs)
+    app = create_app(settings=settings, copilot_client_factory=lambda: fake)
+    if client_addr is not None:
+        return TestClient(app, client=client_addr)
+    return TestClient(app)
+
+
+def chat(client: TestClient, headers: dict | None = None, **extra) -> dict:
+    body = {
+        "model": "claude-sonnet",
+        "messages": [{"role": "user", "content": "Read main.py"}],
+    }
+    body.update(extra)
+    response = client.post("/v1/chat/completions", json=body, headers=headers or {})
+    assert response.status_code == 200
+    return response.json()
+
+
+BAD_TOOL_REPLY = "```tool_call\nthis is not json\n```"
+
+
+def test_monitor_api_requires_bearer_token(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    for path in (
+        "/monitor/api/summary",
+        "/monitor/api/requests",
+        "/monitor/api/requests/some-id",
+    ):
+        assert client.get(path).status_code == 401
+        assert (
+            client.get(path, headers={"Authorization": "Bearer wrong"}).status_code
+            == 401
+        )
+    assert client.get("/monitor/api/summary", headers=AUTH).status_code == 200
+
+
+def test_monitor_api_open_for_loopback_clients(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    assert client.get("/monitor/api/summary").status_code == 200
+
+
+def test_monitor_loopback_open_can_be_disabled(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(),
+        tmp_path,
+        client_addr=("127.0.0.1", 50000),
+        M365_MONITOR_LOOPBACK_OPEN="false",
+    )
+    assert client.get("/monitor/api/summary").status_code == 401
+    assert client.get("/monitor/api/summary", headers=AUTH).status_code == 200
+
+
+def test_monitor_session_reports_masked_token_only(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    body = client.get("/monitor/api/session").json()
+    assert body["loopback"] is True
+    assert "fake-token" not in str(body)
+    assert "masked" in body["token"]
+
+
+def test_monitor_token_reveal_is_loopback_only(tmp_path) -> None:
+    loopback = build_monitor_client(
+        FakeCopilotClient(), tmp_path, client_addr=("127.0.0.1", 50000)
+    )
+    assert loopback.get("/monitor/api/token").json() == {
+        "access_token": "fake-token"
+    }
+    remote = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert remote.get("/monitor/api/token", headers=AUTH).status_code == 403
+
+
+def test_normal_request_records_metadata_without_content(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client)
+
+    summary = client.get("/monitor/api/summary", headers=AUTH).json()
+    assert summary["requests"] == 1
+    assert summary["total_tokens"] > 0
+    assert summary["errors"] == 0
+
+    requests = client.get("/monitor/api/requests", headers=AUTH).json()["requests"]
+    assert len(requests) == 1
+    entry = requests[0]
+    assert entry["status"] == "ok"
+    assert entry["model"] == "claude-sonnet"
+    assert entry["tone"] == "Claude_Sonnet"
+    assert entry["stream"] == 0
+    assert entry["session_key"]
+    assert entry["prompt_tokens"] > 0
+    assert entry["completion_tokens"] > 0
+    assert entry["duration_ms"] >= 0
+    # capture=failures（默认）下，正常请求不留任何内容现场
+    assert entry["prompt_summary"] is None
+    assert entry["reply_snippet"] is None
+
+    detail = client.get(
+        f"/monitor/api/requests/{entry['id']}", headers=AUTH
+    ).json()
+    assert len(detail["attempts"]) == 1
+    assert detail["attempts"][0]["status"] == "ok"
+    assert detail["attempts"][0]["text"] is None
+
+
+def test_guard_retries_produce_attempt_chain_with_excerpts(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    body = chat(client, tools=SAMPLE_TOOLS)
+    assert body["x_m365_guard"]["guard"] == TOOL_PARSE_FAILURE
+
+    requests = client.get("/monitor/api/requests", headers=AUTH).json()["requests"]
+    entry = requests[0]
+    assert entry["status"] == "guard"
+    assert entry["guard"] == TOOL_PARSE_FAILURE
+    # failures 档位：守卫触发的请求保留脱敏现场
+    assert entry["prompt_summary"]
+
+    detail = client.get(f"/monitor/api/requests/{entry['id']}", headers=AUTH).json()
+    attempts = detail["attempts"]
+    assert [a["seq"] for a in attempts] == [1, 2]
+    assert attempts[0]["retried"] == 1
+    assert attempts[0]["guard"] == TOOL_PARSE_FAILURE
+    assert attempts[1]["retried"] == 0
+    assert all("not json" in a["text"] for a in attempts)
+
+    summary = client.get("/monitor/api/summary", headers=AUTH).json()
+    assert summary["guarded"] == 1
+    assert summary["errors"] == 1
+
+
+def test_capture_failures_truncates_excerpts_to_2kb(tmp_path) -> None:
+    huge = "```tool_call\n" + "x" * 5000 + "\n```"
+    fake = ScriptedCopilotClient([huge, huge])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    detail = client.get(f"/monitor/api/requests/{entry['id']}", headers=AUTH).json()
+    for attempt in detail["attempts"]:
+        assert len(attempt["text"]) < 2200
+
+
+def test_capture_off_stores_no_content_even_on_failure(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path, M365_MONITOR_CAPTURE="off")
+    chat(client, tools=SAMPLE_TOOLS)
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["status"] == "guard"
+    assert entry["prompt_summary"] is None
+    assert entry["reply_snippet"] is None
+    detail = client.get(f"/monitor/api/requests/{entry['id']}", headers=AUTH).json()
+    assert all(a["text"] is None for a in detail["attempts"])
+
+
+def test_capture_all_keeps_content_for_ok_requests(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, M365_MONITOR_CAPTURE="all"
+    )
+    chat(client)
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["status"] == "ok"
+    assert "Read main.py" in entry["prompt_summary"]
+    assert entry["reply_snippet"] == "copilot reply"
+
+
+def test_upstream_error_recorded_with_error_status(tmp_path) -> None:
+    client = build_monitor_client(ErrorCopilotClient(), tmp_path)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 502
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["status"] == "error"
+    assert "substrate exploded" in entry["error"]
+
+
+def test_streaming_request_recorded(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as response:
+        assert response.status_code == 200
+        for _ in response.iter_text():
+            pass
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["stream"] == 1
+    assert entry["status"] == "ok"
+    assert entry["completion_tokens"] > 0
+
+
+def test_session_header_takes_priority_over_conversation_key(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client, headers={"x-session-id": "opencode-thread-1"})
+    chat(client)  # 无 header：回退到 conversation key
+
+    filtered = client.get(
+        "/monitor/api/requests", headers=AUTH, params={"session": "opencode-thread-1"}
+    ).json()["requests"]
+    assert len(filtered) == 1
+    assert filtered[0]["session_key"] == "opencode-thread-1"
+
+    everything = client.get("/monitor/api/requests", headers=AUTH).json()["requests"]
+    fallback = [r for r in everything if r["session_key"] != "opencode-thread-1"]
+    assert len(fallback) == 1
+    assert len(fallback[0]["session_key"]) == 16  # 首条 user 消息哈希
+
+
+def test_monitor_disabled_leaves_main_path_unchanged(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, M365_MONITOR_ENABLED=False
+    )
+    body = chat(client)
+    assert body["choices"][0]["message"]["content"] == "copilot reply"
+    assert body["usage"]["total_tokens"] > 0
+    assert client.get("/monitor/api/summary", headers=AUTH).status_code == 404
+    assert not (tmp_path / "monitor.db").exists()
+
+
+def test_monitor_init_failure_does_not_break_chat(tmp_path) -> None:
+    # 指向不存在的目录使 SQLite 初始化失败：Monitor 必须静默降级，主链路不受影响
+    client = build_monitor_client(
+        FakeCopilotClient(),
+        tmp_path,
+        M365_MONITOR_DB_PATH=str(tmp_path / "missing-dir" / "monitor.db"),
+    )
+    body = chat(client)
+    assert body["choices"][0]["message"]["content"] == "copilot reply"
+    assert client.get("/monitor/api/summary", headers=AUTH).status_code == 404
+
+
+GOOD_TOOL_REPLY = (
+    '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```'
+)
+
+
+def test_tool_call_recorded_and_closed_by_next_turn(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done", "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s1"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read"
+
+    # 未闭环：有调用、无结果
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools == [
+        {
+            "name": "read",
+            "category": "builtin",
+            "calls": 1,
+            "closed": 0,
+            "errors": 0,
+            "empty_results": 0,
+            "unclosed": 0,
+            "result_bytes": 0,
+            "error_rate": 0.0,
+        }
+    ]
+
+    # 下一轮携带工具结果（OpenCode 全量 transcript）→ 闭环出 error 标记与字节数
+    followup = {
+        "model": "claude-sonnet",
+        "tools": SAMPLE_TOOLS,
+        "messages": [
+            {"role": "user", "content": "Read main.py"},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": "Error: file not found",
+            },
+        ],
+    }
+    assert (
+        client.post("/v1/chat/completions", json=followup, headers=headers).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["closed"] == 1
+    assert tools[0]["errors"] == 1
+    assert tools[0]["error_rate"] == 1.0
+    assert tools[0]["result_bytes"] == len("Error: file not found")
+
+    # 再重发同一 transcript：已闭环的调用不会被重复计数
+    assert (
+        client.post("/v1/chat/completions", json=followup, headers=headers).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["calls"] == 1
+    assert tools[0]["closed"] == 1
+
+
+def _tool_followup(call: dict, content: str) -> dict:
+    return {
+        "model": "claude-sonnet",
+        "tools": SAMPLE_TOOLS,
+        "messages": [
+            {"role": "user", "content": "Read main.py"},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": call["id"], "content": content},
+        ],
+    }
+
+
+def test_empty_tool_result_is_flagged(tmp_path) -> None:
+    """工具跑通但结果近乎为空（webfetch 抓到十几字节、glob 零命中）要能看见。"""
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-empty"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+
+    assert (
+        client.post(
+            "/v1/chat/completions", json=_tool_followup(call, "No files"), headers=headers
+        ).status_code
+        == 200
+    )
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    empty = [e for e in errors if e["type"] == "empty_tool_result"]
+    assert empty and "read returned 8B" in empty[0]["detail"]
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["empty_results"] == 1
+    assert tools[0]["errors"] == 0
+
+
+def test_tool_call_without_result_is_flagged_unclosed(tmp_path) -> None:
+    """下一轮 transcript 没带回结果 = OpenCode 没收尾，会话断在工具调用上。"""
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-unclosed"}
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    unclosed = [e for e in errors if e["type"] == "tool_call_unclosed"]
+    assert unclosed and unclosed[0]["detail"].startswith("read (")
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["unclosed"] == 1
+
+
+def test_late_tool_result_clears_unclosed_flag(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done", "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-late"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    assert client.get("/monitor/api/tools", headers=AUTH).json()["tools"][0]["unclosed"] == 1
+
+    assert (
+        client.post(
+            "/v1/chat/completions",
+            json=_tool_followup(call, "x" * 200),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["unclosed"] == 0
+    assert tools[0]["closed"] == 1
+
+
+def test_errors_timeline_contains_guard_and_throttled(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert any(e["type"] == "guard" and TOOL_PARSE_FAILURE in e["detail"] for e in errors)
+
+
+def test_errors_timeline_records_throttled_upstream(tmp_path) -> None:
+    class ThrottledClient(FakeCopilotClient):
+        async def chat(
+            self,
+            prompt: str,
+            additional_context: list[str],
+            session: object | None = None,
+        ) -> str:
+            raise SubstrateThrottledError("too many requests")
+
+    client = build_monitor_client(ThrottledClient(), tmp_path)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 429
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert errors[0]["type"] == "throttled"
+    assert "too many requests" in errors[0]["detail"]
+
+
+def test_session_aggregation_endpoint(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    headers = {"x-session-id": "thread-42"}
+    chat(client, headers=headers)
+    chat(client, headers=headers)
+
+    detail = client.get("/monitor/api/sessions/thread-42", headers=AUTH).json()
+    assert detail["summary"]["requests"] == 2
+    assert detail["summary"]["total_tokens"] > 0
+    assert detail["summary"]["errors"] == 0
+    assert len(detail["requests"]) == 2
+    assert detail["tool_calls"] == []
+    assert detail["events"] == []
+
+    assert (
+        client.get("/monitor/api/sessions/no-such-key", headers=AUTH).status_code
+        == 404
+    )
+
+
+def test_stream_aggregate_metrics_recorded(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as response:
+        for _ in response.iter_text():
+            pass
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["chunk_count"] == 2
+    assert entry["stream_complete"] == 1
+    assert entry["first_chunk_ms"] is not None
+    # 正常完成的流不应出现 stream_incomplete 事件
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    assert all(e["type"] != "stream_incomplete" for e in errors)
+
+
+def test_tool_category_buckets() -> None:
+    from teams_copilot_proxy.monitor import tool_category
+
+    assert tool_category("write") == "builtin"
+    assert tool_category("mcp__github__create_issue") == "mcp"
+    assert tool_category("task") == "task"
+    assert tool_category("skill") == "skill"
+    assert tool_category("todowrite") == "todowrite"
+    assert tool_category("webfetch") == "webfetch"
+    assert tool_category("somethingelse") == "other"
+
+
+def test_dashboard_page_served_when_enabled(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    response = client.get("/monitor")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    # 静态壳：不含任何监控数据，数据请求由浏览器带 Bearer token 拉取
+    assert "Copilot Proxy Monitor" in response.text
+    assert "localStorage" in response.text
+
+
+def test_dashboard_404_when_monitor_disabled(tmp_path) -> None:
+    client = build_monitor_client(
+        FakeCopilotClient(), tmp_path, M365_MONITOR_ENABLED=False
+    )
+    assert client.get("/monitor").status_code == 404
+
+
+SHELL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            },
+        },
+    }
+]
+
+
+def _efficiency(client: TestClient) -> list[dict]:
+    return client.get("/monitor/api/tool-efficiency", headers=AUTH).json()["modes"]
+
+
+def test_tool_efficiency_requires_bearer_token(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert client.get("/monitor/api/tool-efficiency").status_code == 401
+    assert (
+        client.get("/monitor/api/tool-efficiency", headers=AUTH).status_code == 200
+    )
+
+
+def test_tool_efficiency_baseline_for_successful_tool_call(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    modes = _efficiency(client)
+    assert len(modes) == 1
+    row = modes[0]
+    assert row["planning_mode"] == "single"
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 1
+    assert row["tool_call_yield"] == 1.0
+    assert row["avg_attempts"] == 1.0
+    assert row["guard_rate"] == 0.0
+    assert row["shell_recovered"] == 0
+    assert row["deduped"] == 0
+
+
+def test_tool_efficiency_records_router_planning_mode(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(
+        fake, tmp_path, M365_TOOL_PLANNING_MODE="router"
+    )
+    chat(client, tools=SAMPLE_TOOLS)
+
+    modes = _efficiency(client)
+    assert len(modes) == 1
+    row = modes[0]
+    assert row["planning_mode"] == "router"
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 1
+
+
+def test_tool_efficiency_excludes_non_tool_requests(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client)  # no tools
+    assert _efficiency(client) == []
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["had_tools"] == 0
+
+
+def test_tool_efficiency_counts_corrections_and_missed_yield(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, BAD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    row = _efficiency(client)[0]
+    assert row["requests"] == 1
+    assert row["with_tool_call"] == 0
+    assert row["tool_call_yield"] == 0.0
+    assert row["guard_rate"] == 1.0
+    assert row["avg_attempts"] == 2.0
+    assert row["avg_corrections"] == 1.0
+
+
+def test_shell_fence_recovery_counted(tmp_path) -> None:
+    fake = ScriptedCopilotClient(["Let me list files.\n```bash\nls -la\n```"])
+    client = build_monitor_client(fake, tmp_path)
+    body = chat(client, tools=SHELL_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "bash"
+
+    row = _efficiency(client)[0]
+    assert row["shell_recovered"] == 1
+    assert row["with_tool_call"] == 1
+
+
+def test_dedup_counted(tmp_path) -> None:
+    dup = (
+        '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```\n'
+        '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```'
+    )
+    fake = ScriptedCopilotClient([dup])
+    client = build_monitor_client(
+        fake, tmp_path, M365_ALLOW_PARALLEL_TOOL_CALLS=True
+    )
+    body = chat(client, tools=SAMPLE_TOOLS)
+    assert len(body["choices"][0]["message"]["tool_calls"]) == 1
+
+    row = _efficiency(client)[0]
+    assert row["deduped"] == 1
+
+
+def test_repeated_failure_flag_recorded(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "read", "arguments": '{"filePath": "a.py"}'},
+    }
+    dup_call = {**call, "id": "call_2"}
+    messages = [
+        {"role": "user", "content": "Read a.py"},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Error: boom"},
+        {"role": "assistant", "content": None, "tool_calls": [dup_call]},
+        {"role": "tool", "tool_call_id": "call_2", "content": "Error: boom"},
+    ]
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "claude-sonnet", "tools": SAMPLE_TOOLS, "messages": messages},
+    )
+    assert response.status_code == 200
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["repeated_failure"] == 1
+
+
+def test_tool_efficiency_since_filters_stale_rows(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    assert len(_efficiency(client)) == 1
+    future = time.time() + 3600
+    filtered = client.get(
+        f"/monitor/api/tool-efficiency?since={future}", headers=AUTH
+    ).json()["modes"]
+    assert filtered == []
+
+
+def test_guard_effectiveness_reports_recovery_by_guard(tmp_path) -> None:
+    # First attempt is bad JSON (guard), retry succeeds -> recovered.
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    guards = client.get(
+        "/monitor/api/guard-effectiveness", headers=AUTH
+    ).json()["guards"]
+    row = next(g for g in guards if g["guard"] == TOOL_PARSE_FAILURE)
+    assert row["hits"] == 1
+    assert row["recovered"] == 1
+    assert row["recovery_rate"] == 1.0
+    assert row["tone"] == "Claude_Sonnet"
+
+
+def test_attempt_records_error_detail_for_parse_failure(tmp_path) -> None:
+    fake = ScriptedCopilotClient([BAD_TOOL_REPLY, GOOD_TOOL_REPLY])
+    client = build_monitor_client(fake, tmp_path)
+    chat(client, tools=SAMPLE_TOOLS)
+
+    req_id = client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    detail = client.get(f"/monitor/api/requests/{req_id}", headers=AUTH).json()
+    first = detail["attempts"][0]
+    assert first["guard"] == TOOL_PARSE_FAILURE
+    assert first["error_detail"]
+
+
+def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
+    import sqlite3
+
+    db = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts REAL, "
+        "session_key TEXT, duration_ms INTEGER)"
+    )
+    conn.commit()
+    conn.close()
+
+    sink = SQLiteSink(db, retention_days=0)
+    try:
+        columns = {
+            row[1]
+            for row in sink._conn.execute("PRAGMA table_info(requests)").fetchall()
+        }
+        assert {
+            "had_tools",
+            "planning_mode",
+            "reasoning_effort",
+            "shell_recovered",
+            "deduped",
+            "repeated_call",
+            "repeated_failure",
+        } <= columns
+        attempt_columns = {
+            row[1]
+            for row in sink._conn.execute(
+                "PRAGMA table_info(attempts)"
+            ).fetchall()
+        }
+        assert {
+            "error_detail",
+            "phase",
+            "injections",
+            "conversation_id",
+            "client_request_id",
+            "images",
+            "option_sets",
+            "sent_bytes",
+            "first_frame_ms",
+            "frames",
+            "message_types",
+            "reply_bytes",
+            "citations",
+            "terminated_cleanly",
+            "upstream_status",
+            "close_reason",
+            "final_frame",
+            "sent_head",
+            "sent_tail",
+        } <= attempt_columns
+        assert {
+            "client_session_id",
+            "client_agent",
+            "project_path",
+            "turn_kind",
+            "messages_count",
+            "transcript_bytes",
+            "system_bytes",
+            "context_pct",
+            "tools_count",
+            "tool_kinds",
+            "tools_fingerprint",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "response_format",
+            "injections",
+        } <= columns
+    finally:
+        sink.close()
+
+
+class TelemetryCopilotClient(FakeCopilotClient):
+    """Fake client that publishes substrate round-trip facts like the real one."""
+
+    def __init__(self) -> None:
+        self.last_turn: TurnTelemetry | None = None
+
+    async def chat(
+        self, prompt: str, additional_context: list[str], session: object | None = None
+    ) -> str:
+        turn = TurnTelemetry(
+            conversation_id="conv-123",
+            client_request_id="req-abc",
+            frames=4,
+            first_frame_ms=250,
+            reply_bytes=13,
+            citations=2,
+            terminated_cleanly=True,
+            message_types=["Progress", "Chat"],
+            images=1,
+            option_sets=7,
+        )
+        turn.mark_sent("x" * 3000)
+        self.last_turn = turn
+        return "copilot reply"
+
+
+OPENCODE_HEADERS = {
+    "x-session-id": "ses_opencode_1",
+    "user-agent": "opencode/1.18.5",
+}
+
+
+def opencode_chat(client: TestClient, **extra) -> dict:
+    body = {
+        "model": "claude-sonnet",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Working directory: /srv/boss-cli\nBe terse.",
+            },
+            {"role": "user", "content": "Read main.py"},
+        ],
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        "tools": SAMPLE_TOOLS,
+    }
+    body.update(extra)
+    response = client.post(
+        "/v1/chat/completions", json=body, headers={**AUTH, **OPENCODE_HEADERS}
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_request_records_opencode_identity_and_shape(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY]), tmp_path
+    )
+    opencode_chat(client)
+
+    entry = client.get("/monitor/api/requests", headers=AUTH).json()["requests"][0]
+    assert entry["client_session_id"] == "ses_opencode_1"
+    assert entry["client_agent"] == "opencode/1.18.5"
+    assert entry["project_path"] == "/srv/boss-cli"
+    assert entry["turn_kind"] == "tool"
+    assert entry["messages_count"] == 2
+    assert entry["transcript_bytes"] > 0
+    assert entry["system_bytes"] > 0
+    assert 0 < entry["context_pct"] < 1
+    assert entry["tools_count"] == len(SAMPLE_TOOLS)
+    assert entry["tool_kinds"] == "builtin:1"
+    assert entry["tools_fingerprint"]
+    assert entry["temperature"] == 0.2
+    assert entry["top_p"] == 0.9
+    assert entry["max_tokens"] == 4096
+    assert "tool_protocol" in entry["injections"]
+    assert "system_sanitized" in entry["injections"]
+
+
+def test_attempt_records_upstream_turn_facts(tmp_path) -> None:
+    client = build_monitor_client(TelemetryCopilotClient(), tmp_path)
+    chat(client)
+
+    req_id = client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = client.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    assert attempt["conversation_id"] == "conv-123"
+    assert attempt["client_request_id"] == "req-abc"
+    assert attempt["frames"] == 4
+    assert attempt["first_frame_ms"] == 250
+    assert attempt["message_types"] == "Progress,Chat"
+    assert attempt["reply_bytes"] == 13
+    assert attempt["citations"] == 2
+    assert attempt["terminated_cleanly"] == 1
+    assert attempt["sent_bytes"] == 3000
+    assert attempt["images"] == 1
+    assert attempt["option_sets"] == 7
+
+
+def test_upstream_prompt_capture_is_gated_by_capture_mode(tmp_path) -> None:
+    default_client = build_monitor_client(TelemetryCopilotClient(), tmp_path)
+    chat(default_client)
+    req_id = default_client.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = default_client.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    # capture=failures（默认）+ 请求成功 -> 只留事实，不留 prompt/帧现场
+    assert attempt["sent_head"] is None
+    assert attempt["sent_tail"] is None
+    assert attempt["frames"] == 4
+
+    verbose_dir = tmp_path / "all"
+    verbose_dir.mkdir()
+    verbose = build_monitor_client(
+        TelemetryCopilotClient(),
+        verbose_dir,
+        M365_MONITOR_CAPTURE="all",
+    )
+    chat(verbose)
+    req_id = verbose.get("/monitor/api/requests", headers=AUTH).json()[
+        "requests"
+    ][0]["id"]
+    attempt = verbose.get(
+        f"/monitor/api/requests/{req_id}", headers=AUTH
+    ).json()["attempts"][0]
+    assert attempt["sent_head"]
+    assert attempt["sent_tail"]
+
+
+def test_requests_can_be_filtered_by_project_and_turn_kind(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY, "plain answer"]), tmp_path
+    )
+    opencode_chat(client)
+    chat(client)  # 普通 chat 轮（无工具、无 project）
+
+    filtered = client.get(
+        "/monitor/api/requests?project=/srv/boss-cli&turn_kind=tool", headers=AUTH
+    ).json()["requests"]
+    assert len(filtered) == 1
+    assert filtered[0]["project_path"] == "/srv/boss-cli"
+    by_session = client.get(
+        "/monitor/api/requests?session=ses_opencode_1", headers=AUTH
+    ).json()["requests"]
+    assert len(by_session) == 1
+
+
+def test_context_pressure_endpoint_reports_growth(tmp_path) -> None:
+    client = build_monitor_client(
+        ScriptedCopilotClient([GOOD_TOOL_REPLY]), tmp_path
+    )
+    opencode_chat(client)
+
+    rows = client.get("/monitor/api/context-pressure", headers=AUTH).json()[
+        "requests"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["prompt_tokens"] > 0
+    assert row["context_pct"] > 0
+    assert row["project_path"] == "/srv/boss-cli"
+
+
+def test_retention_cleanup_deletes_expired_requests(tmp_path) -> None:
+    sink = SQLiteSink(str(tmp_path / "monitor.db"), retention_days=30)
+    old = RequestRecord(
+        id="req-old",
+        ts=time.time() - 40 * 86400,
+        session_key="s",
+        model="m",
+        tone="t",
+        stream=False,
+    )
+    fresh = RequestRecord(
+        id="req-fresh",
+        ts=time.time(),
+        session_key="s",
+        model="m",
+        tone="t",
+        stream=False,
+    )
+    sink.write(old)
+    sink.write(fresh)
+    sink.cleanup()
+    ids = [r["id"] for r in sink.requests(limit=10)]
+    assert ids == ["req-fresh"]
+    sink.close()
+
+
+def test_clear_endpoint_wipes_all_monitor_data(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    chat(client)
+    assert client.get("/monitor/api/summary", headers=AUTH).json()["requests"] == 1
+
+    cleared = client.post("/monitor/api/clear", headers=AUTH).json()
+    assert cleared["requests"] == 1
+    assert cleared["attempts"] >= 1
+
+    assert client.get("/monitor/api/summary", headers=AUTH).json()["requests"] == 0
+    assert client.get("/monitor/api/requests", headers=AUTH).json()["requests"] == []
+
+
+def test_clear_endpoint_requires_auth(tmp_path) -> None:
+    client = build_monitor_client(FakeCopilotClient(), tmp_path)
+    assert client.post("/monitor/api/clear").status_code == 401
+    assert (
+        client.post("/monitor/api/clear", headers={"Authorization": "Bearer wrong"}).status_code
+        == 401
+    )
