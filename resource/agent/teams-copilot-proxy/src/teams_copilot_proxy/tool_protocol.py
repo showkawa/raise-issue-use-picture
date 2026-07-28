@@ -276,6 +276,32 @@ def strip_citations(text: str) -> str:
     return _CITATION_RE.sub("", text)
 
 
+# Debris a reasoning tone leaves after the envelope: an unbalanced closing brace
+# from a nested arguments object, a stray fence, or a trailing separator.
+_JSON_TRAILER_RE = re.compile(r"^[\s}\]`,;]*$")
+
+
+def _loads_tool_json(body: str) -> tuple[Any, json.JSONDecodeError | None]:
+    """Parse a tool_call body, tolerating trailing debris after the envelope.
+
+    The object itself must be complete and valid; only leftovers that carry no
+    payload (extra ``}``, backticks, separators) are dropped, so a reply that is
+    correct apart from one unbalanced brace still yields a tool call instead of
+    burning a correction retry.
+    """
+
+    try:
+        return json.loads(body), None
+    except json.JSONDecodeError as exc:
+        try:
+            payload, end = json.JSONDecoder().raw_decode(body)
+        except json.JSONDecodeError:
+            return None, exc
+        if _JSON_TRAILER_RE.match(body[end:]):
+            return payload, None
+        return None, exc
+
+
 def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
     """Detect a tool_call block in the model output.
 
@@ -301,9 +327,8 @@ def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
 
     body = match.group("body").strip()
     leading = cleaned[: match.start()].strip()
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError as exc:
+    payload, exc = _loads_tool_json(body)
+    if exc is not None:
         return ToolParseOutcome(text=cleaned.strip(), error=f"tool_call block is not valid JSON: {exc}")
     return _validate_payload(payload, allowed_names, leading, cleaned)
 
@@ -325,9 +350,8 @@ def parse_model_output_multi(text: str, allowed_names: set[str]) -> ToolParseOut
     calls: list[ParsedToolCall] = []
     for match in matches:
         body = match.group("body").strip()
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
+        payload, exc = _loads_tool_json(body)
+        if exc is not None:
             return ToolParseOutcome(
                 text=cleaned.strip(), error=f"tool_call block is not valid JSON: {exc}"
             )
@@ -356,9 +380,8 @@ def _try_truncated_tool_call(cleaned: str) -> ToolParseOutcome | None:
             return None
     if not body.startswith("{"):
         return None
-    try:
-        json.loads(body)
-    except json.JSONDecodeError as exc:
+    _, exc = _loads_tool_json(body)
+    if exc is not None:
         return ToolParseOutcome(
             text=cleaned.strip(),
             error=(
@@ -382,9 +405,8 @@ def _try_fenced_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome 
         body = match.group("body").strip()
         if not body.startswith("{"):
             continue
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
+        payload, exc = _loads_tool_json(body)
+        if exc is not None:
             continue
         if not isinstance(payload, dict):
             continue
@@ -407,9 +429,8 @@ def _try_bare_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome | 
         candidate = inner.strip()
     if not candidate.startswith("{"):
         return None
-    try:
-        payload = json.loads(candidate)
-    except json.JSONDecodeError:
+    payload, exc = _loads_tool_json(candidate)
+    if exc is not None:
         return None
     if not isinstance(payload, dict) or "name" not in payload:
         return None
@@ -454,9 +475,8 @@ def _try_shell_fallback(
     candidate = cleaned.strip()
     if not candidate.startswith("{"):
         return None
-    try:
-        payload = json.loads(candidate)
-    except json.JSONDecodeError:
+    payload, exc = _loads_tool_json(candidate)
+    if exc is not None:
         return None
     if not isinstance(payload, dict) or "name" in payload:
         return None

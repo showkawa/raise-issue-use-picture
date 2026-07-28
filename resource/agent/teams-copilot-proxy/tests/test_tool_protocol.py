@@ -112,6 +112,37 @@ def test_parse_tool_call_requires_closing_fence_on_own_line() -> None:
     }
 
 
+def test_parse_tolerates_unbalanced_trailing_brace() -> None:
+    """Observed on gpt-5-6-reasoning: one extra ``}`` after a complete envelope.
+
+    The call itself is well formed, so it must not cost a correction retry.
+    """
+    body = '{"name": "task", "arguments": {"description": "audit", "subagent_type": "explore"}}}'
+    outcome = parse_model_output(f"```tool_call\n{body}\n```", {"task"})
+    assert outcome.error is None
+    assert outcome.tool_calls[0].name == "task"
+    assert outcome.tool_calls[0].arguments == {
+        "description": "audit",
+        "subagent_type": "explore",
+    }
+
+
+def test_parse_rejects_extra_payload_after_envelope() -> None:
+    """Trailing debris is dropped, but a second object is still a parse error."""
+    body = '{"name": "read", "arguments": {"path": "a"}} {"name": "read", "arguments": {"path": "b"}}'
+    outcome = parse_model_output(f"```tool_call\n{body}\n```", {"read"})
+    assert outcome.error is not None
+    assert "not valid JSON" in outcome.error
+
+
+def test_parse_still_reports_truncated_tool_call() -> None:
+    """Tolerating trailing debris must not mask a reply cut off mid-JSON."""
+    text = '```tool_call\n{"name": "write", "arguments": {"content": "aaaa'
+    outcome = parse_model_output(text, {"write"})
+    assert outcome.error is not None
+    assert outcome.error.startswith("tool_call block appears truncated")
+
+
 def test_parse_still_accepts_standard_tool_call() -> None:
     text = '```tool_call\n{"name": "read", "arguments": {"path": "main.py"}}\n```'
     outcome = parse_model_output(text, {"read"})
