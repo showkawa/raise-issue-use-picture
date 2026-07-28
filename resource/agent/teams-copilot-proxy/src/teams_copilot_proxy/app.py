@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from importlib import metadata
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -66,6 +68,7 @@ from .request_facts import (
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
+    available_skill_names,
     correction_prompt,
     dedupe_tool_calls,
     is_truncated_tool_call_error,
@@ -74,6 +77,7 @@ from .tool_protocol import (
     tool_names,
     tool_schemas,
     truncation_retry_prompt,
+    validate_skill_call,
     validate_tool_arguments,
 )
 from .translator import (
@@ -123,6 +127,37 @@ _ROUTER_SELECT_RULES = (
     "only if — no tool is needed to fulfil the request, reply with exactly "
     f"{_NO_TOOL_SIGNAL} and nothing else. Do not write the final answer in this turn."
 )
+
+
+def _build_id() -> str:
+    """Package version plus the short commit it was run from, when the source is
+    a git checkout. Latency numbers are only comparable within one build."""
+    version = metadata.version("teams-copilot-proxy")
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return version
+    return f"{version}+{sha}" if sha else version
+
+
+def _config_fingerprint(settings: Settings) -> str:
+    """The settings that plausibly move latency, in a readable groupable form."""
+    return (
+        f"plan={_normalize_planning_mode(settings.tool_planning_mode)}"
+        f"|tone={settings.default_tone}"
+        f"|transcript={settings.max_transcript_chars}"
+        f"|corr={settings.tool_correction_retries}"
+        f"|chunk={settings.stream_chunk_chars}/{settings.stream_chunk_delay_ms}"
+        f"|ka={settings.stream_keepalive_interval_s}"
+        f"|throttle={settings.throttle_retries}"
+    )
 
 
 def _normalize_planning_mode(raw: str) -> str:
@@ -246,7 +281,10 @@ def create_app(
                 resolved_settings.monitor_retention_days,
             )
             app.state.monitor = MonitorBus(
-                sink, capture=resolved_settings.monitor_capture
+                sink,
+                capture=resolved_settings.monitor_capture,
+                build=_build_id(),
+                config_fp=_config_fingerprint(resolved_settings),
             )
         except Exception:
             logger.exception("Monitor init failed; running without monitoring.")
@@ -447,6 +485,7 @@ def create_app(
                             input_text=input_text,
                             recorder=recorder,
                             planning_mode=planning_mode,
+                            completion_id=request_id,
                         ),
                         media_type="text/event-stream",
                     )
@@ -459,6 +498,7 @@ def create_app(
                         session,
                         input_text=input_text,
                         recorder=recorder,
+                        completion_id=request_id,
                     ),
                     media_type="text/event-stream",
                 )
@@ -773,6 +813,7 @@ def _record_request_shape(
         messages_count=len(request.messages),
         transcript_bytes=transcript_bytes,
         system_bytes=system_bytes,
+        protocol_bytes=translated.protocol_bytes,
         tools_count=len(translated.tools or []),
         tool_kinds=tool_kinds(translated.tools),
         tools_fingerprint=tools_fingerprint(translated.tools),
@@ -860,6 +901,27 @@ def _conversation_key(messages: Sequence[object]) -> str | None:
     return None
 
 
+def _redirect_guard(text: str, tools_have_run: bool) -> str | None:
+    """The guard a plain-prose reply trips, if any.
+
+    ``tools_have_run`` keeps completion claims legitimate: "created the file" is
+    only a hallucination while no tool has actually run in this turn.
+    """
+    if detect_hosted_file_link(text):
+        return HOSTED_FILE_LINK
+    if detect_confabulation(text):
+        return CONFABULATION
+    if not tools_have_run and detect_hallucinated_completion(text):
+        return HALLUCINATED_COMPLETION
+    return None
+
+
+def _tools_have_run(prompt: str, additional_context: list[str]) -> bool:
+    return "Tool result (" in prompt or any(
+        "Tool result (" in ctx for ctx in additional_context
+    )
+
+
 async def _chat_resolving_tools(
     client: SubstrateCopilotClient,
     prompt: str,
@@ -884,12 +946,9 @@ async def _chat_resolving_tools(
         )
     allowed = tool_names(tools)
     schemas = tool_schemas(tools)
+    skills = available_skill_names("\n".join([prompt, *additional_context]))
     parse = parse_model_output_multi if allow_parallel else parse_model_output
-    # Completion claims are only hallucinations when no tool has actually run yet;
-    # after real tool results a "created/updated the file" summary is legitimate.
-    tools_have_run = "Tool result (" in prompt or any(
-        "Tool result (" in ctx for ctx in additional_context
-    )
+    tools_have_run = _tools_have_run(prompt, additional_context)
     # Each failure mode gets its own allowance: a redirect (e.g. the model answered
     # with a hosted download link) must not consume the retry a later truncated or
     # malformed tool call needs, which is what turned a recoverable /init turn into
@@ -928,7 +987,7 @@ async def _chat_resolving_tools(
             for call in outcome.tool_calls:
                 schema_error = validate_tool_arguments(
                     call.name, call.arguments, schemas
-                )
+                ) or validate_skill_call(call.name, call.arguments, skills)
                 if schema_error is not None:
                     outcome = ToolParseOutcome(
                         text=text.strip(), error=schema_error
@@ -936,22 +995,24 @@ async def _chat_resolving_tools(
                     break
         if outcome.error is None:
             if outcome.tool_call is None and outcome.text:
-                triggered = None
-                if detect_hosted_file_link(outcome.text):
-                    triggered = HOSTED_FILE_LINK
-                elif detect_confabulation(outcome.text):
-                    triggered = CONFABULATION
-                elif not tools_have_run and detect_hallucinated_completion(outcome.text):
-                    triggered = HALLUCINATED_COMPLETION
+                triggered = _redirect_guard(outcome.text, tools_have_run)
                 if triggered is not None:
                     if used_redirect < budget:
                         used_redirect += 1
+                        # Quoting a refusal back tends to anchor the model on
+                        # repeating it verbatim, so the last allowance drops the
+                        # quoted reply and demands the tool call outright.
+                        final = used_redirect == budget
                         recorder.add_attempt(
                             started, guard=triggered, retried=True,
                             status=STATUS_GUARD, text=text,
                         )
-                        attempt_prompt = guard_retry_prompt(triggered)
-                        attempt_context = _retry_context(additional_context, prompt, text)
+                        attempt_prompt = guard_retry_prompt(triggered, strict=final)
+                        attempt_context = (
+                            additional_context + [f"Original request:\n{prompt}"]
+                            if final
+                            else _retry_context(additional_context, prompt, text)
+                        )
                         recorder.add_injection(f"correction:{triggered}")
                         continue
                     outcome.guard = triggered
@@ -1038,6 +1099,29 @@ async def _route_resolving_tools(
         recorder.add_attempt(started, guard=DISENGAGED, status=STATUS_ERROR)
         recorder.set_phase(None)
         return ToolParseOutcome(text=DISENGAGED_SENTINEL, guard=DISENGAGED)
+    # The answer turn is prose by construction, so the redirect guards have to run
+    # here too: a "the repository is not exposed to my environment" refusal that
+    # slips through is a silent failure the client reports as a normal answer.
+    triggered = _redirect_guard(text, _tools_have_run(prompt, additional_context))
+    if triggered is not None:
+        recorder.add_attempt(
+            started, guard=triggered, retried=True, status=STATUS_GUARD, text=text
+        )
+        recorder.add_injection(f"correction:{triggered}")
+        recorder.set_phase("select")
+        outcome = await _chat_resolving_tools(
+            client,
+            guard_retry_prompt(triggered),
+            _retry_context(additional_context, prompt, text),
+            tools,
+            session,
+            max_corrections,
+            allow_parallel,
+            recorder=recorder,
+            planning_mode="single",
+        )
+        recorder.set_phase(None)
+        return outcome
     recorder.add_attempt(started, status=STATUS_OK, text=text)
     recorder.set_phase(None)
     return ToolParseOutcome(text=text.strip())
@@ -1104,8 +1188,9 @@ async def _openai_stream_with_tools(
     input_text: str = "",
     recorder=_NULL_RECORDER,
     planning_mode: str = "single",
+    completion_id: str | None = None,
 ) -> AsyncIterator[str]:
-    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    completion_id = completion_id or f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
 
     def chunk(delta: dict, finish_reason: str | None = None, extra: dict | None = None) -> str:
@@ -1141,6 +1226,7 @@ async def _openai_stream_with_tools(
                     done, _ = await asyncio.wait({resolve_task}, timeout=keepalive_interval)
                     if done:
                         break
+                    recorder.add_keepalive()
                     yield ": keepalive\n\n"
             outcome = await resolve_task
         except SubstrateCopilotError as exc:
@@ -1214,8 +1300,9 @@ async def _openai_stream(
     session: PersistentSession | None = None,
     input_text: str = "",
     recorder=_NULL_RECORDER,
+    completion_id: str | None = None,
 ) -> AsyncIterator[str]:
-    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    completion_id = completion_id or f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
     started = recorder.attempt_timer()

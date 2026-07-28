@@ -4,7 +4,7 @@ Give [OpenCode](https://opencode.ai) full coding capabilities backed by Microsof
 
 This project runs a local FastAPI proxy that talks to the same `substrate.office.com` WebSocket API used by the M365 Copilot web UI, then exposes it to OpenCode as an OpenAI-compatible `/v1/chat/completions` endpoint.
 
-**Scope:** this proxy is built and tuned specifically for OpenCode 1.18.4. It is not intended to support other clients (e.g. Codex or Claude Code); the OpenAI Responses (`/v1/responses`) and Anthropic Messages (`/v1/messages`) endpoints have been removed.
+**Scope:** this proxy is built and tuned for OpenCode 1.18.x (validated with 1.18.7). It is not intended to support other clients (e.g. Codex or Claude Code); the OpenAI Responses (`/v1/responses`) and Anthropic Messages (`/v1/messages`) endpoints have been removed.
 
 No Azure app registration. No admin consent. Sign in with your normal M365 Copilot browser session.
 
@@ -33,7 +33,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Drives OpenCode's agentic coding loop from M365 Copilot
 - Works with your existing signed-in Copilot web session
 - Runs locally on `127.0.0.1` by default
-- Auto-captures and refreshes the short-lived browser token
+- Automatically obtains and refreshes the short-lived substrate token through OAuth PKCE or Chrome CDP capture
 - Supports persistent Copilot sessions across turns
 - Emulated tool calling on `/v1/chat/completions`, so OpenCode can read files, run commands, and edit code
 - Image/vision input: OpenCode image attachments are uploaded to the substrate and described by the model (GPT-5 / reasoning tones)
@@ -198,7 +198,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
 
 ## Token Management
 
-M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Chrome window.
+M365 Copilot access tokens usually expire in about 1 hour. The proxy prefers OAuth PKCE refresh when a cached `.oauth_tokens.json` is available and falls back to the dedicated signed-in Chrome window.
 
 ### Refresh
 
@@ -301,7 +301,7 @@ Example:
 | `POST /v1/chat/completions` | OpenAI Chat Completions (the endpoint OpenCode uses), streaming and tool calling supported |
 | `GET /monitor` | Read-only monitoring dashboard (static page; loopback clients need no token, remote data calls need the Bearer token) |
 | `GET /monitor/api/session` | Dashboard bootstrap: current substrate token status (masked, never the full value) |
-| `GET /monitor/api/token` | Full current substrate token — loopback clients only (dashboard “copy token” button) |
+| `GET /monitor/api/token` | Full current substrate token for an authenticated monitor client (dashboard "copy token" button); loopback clients may be unauthenticated when `M365_MONITOR_LOOPBACK_OPEN=true` |
 | `GET /monitor/api/summary` | Aggregate counters: requests, tokens, error/guard rates, tone breakdown |
 | `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=` — matches the OpenCode session id or the derived key, `?project=`, `?turn_kind=`) |
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
@@ -507,14 +507,14 @@ Most users only need `.env` after the proxy captures a token.
 - The proxy listens on `127.0.0.1` by default.
 - The browser token is stored locally in `.env`.
 - `.env`, `.venv/`, and Python cache files are ignored by Git.
-- The proxy does not send your token to any external service besides Microsoft 365 Copilot's own `substrate.office.com` endpoint.
+- The proxy sends OAuth authorization and token requests to Microsoft identity endpoints when using `login`, `login-device`, or refresh; it sends the resulting access token to Microsoft 365 Copilot's `substrate.office.com` endpoint. No third-party service is required by the proxy.
 - Anyone who can read your `.env` can use the token until it expires. Treat it like a secret.
 
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
-- Token refresh depends on a signed-in Chrome profile.
-- Built for OpenCode 1.18.4 only; other clients (Codex, Claude Code) are not supported.
+- Token refresh normally uses OAuth PKCE; Chrome CDP capture remains the fallback when OAuth is unavailable.
+- Built for OpenCode 1.18.x (validated with 1.18.7); other clients (Codex, Claude Code) are not supported.
 - Tool calls are emulated via prompting on `/v1/chat/completions` (parallel calls per-tone via `M365_PARALLEL_TOOL_TONES`, default `Claude_Sonnet`, or forced on for all tones with `M365_ALLOW_PARALLEL_TOOL_CALLS`; the reasoning tones stay single-tool-per-turn; with tools the body is buffered upstream, then streamed to the client as typewriter chunks).
 - Sampling params (`temperature`/`top_p`) are forwarded best-effort but the substrate chat channel may ignore them; `top_k`/`max_tokens` have no substrate equivalent, and `reasoning_effort` is emulated by tone routing (no true per-request effort control).
 - Guard detection is heuristic; on T3 tiers (no Claude tone) tool calling is best-effort and unreliable.

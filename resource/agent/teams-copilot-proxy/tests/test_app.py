@@ -807,6 +807,17 @@ def test_confabulation_detects_sandbox_and_mount_hallucination() -> None:
     assert detect_confabulation(
         "The project directory is not mounted, so I stopped without changes."
     )
+    # Subagent final report captured live: a confabulated refusal preamble that
+    # previously slipped past the guard and polluted the parent task result.
+    subagent_refusal = (
+        "I could not complete the requested repository-wide verification because "
+        "the Windows workspace referenced in the transcript was not available to "
+        "the active filesystem tools in this turn."
+    )
+    assert detect_confabulation(subagent_refusal)
+    assert detect_confabulation(
+        "That path is not accessible to the available tools, so nothing was read."
+    )
     # A normal reply that merely mentions files must not trip the guard.
     assert not detect_confabulation("I will attach the generated report to the PR.")
     assert not detect_confabulation("The program prints 'hello' and then exits.")
@@ -2271,6 +2282,101 @@ def test_schema_validation_rejects_wrong_argument_type() -> None:
     assert "must be of type" in fake.calls[1][0]
 
 
+SKILL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "skill",
+            "description": "Load a skill",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    }
+]
+
+SKILL_CATALOGUE = (
+    "Skills provide specialized instructions.\n"
+    "<available_skills>\n"
+    "  <skill>\n    <name>customize-opencode</name>\n"
+    "    <description>opencode's own configuration</description>\n  </skill>\n"
+    "  <skill>\n    <name>grill-me</name>\n"
+    "    <description>interview a plan</description>\n  </skill>\n"
+    "</available_skills>"
+)
+
+
+def test_unknown_skill_name_is_rejected_before_the_client_runs_it() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "init-repo"}}\n```',
+        '```tool_call\n{"name": "skill", "arguments": {"name": "grill-me"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [
+                {"role": "system", "content": SKILL_CATALOGUE},
+                {"role": "user", "content": "sharpen my plan"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "grill-me"}
+    correction = fake.calls[1][0]
+    assert 'skill "init-repo" does not exist' in correction
+    assert "customize-opencode, grill-me" in correction
+
+
+def test_known_skill_name_passes_through() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "customize-opencode"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [
+                {"role": "system", "content": SKILL_CATALOGUE},
+                {"role": "user", "content": "enable lsp in opencode.json"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "customize-opencode"}
+    assert len(fake.calls) == 1
+
+
+def test_skill_call_untouched_when_no_catalogue_in_prompt() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "whatever"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [{"role": "user", "content": "load a skill"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "whatever"}
+    assert len(fake.calls) == 1
+
+
 def _repeated_failure_transcript() -> list[dict]:
     failing_call = {
         "id": "call_1",
@@ -2489,6 +2595,82 @@ def test_router_mode_makes_a_second_turn_for_the_answer() -> None:
     assert len(fake.calls) == 2
     assert any("TOOL-SELECTION TURN" in part for part in fake.calls[0][1])
     assert not any("TOOL-SELECTION TURN" in part for part in fake.calls[1][1])
+
+
+def test_router_answer_turn_refusal_is_guarded_and_recovered() -> None:
+    fake = ToolCallingCopilotClient(
+        [
+            "NO_TOOL_NEEDED",
+            (
+                "I couldn't complete the investigation: the repository is not "
+                "exposed to the available filesystem tools. No files were modified."
+            ),
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Investigate the repository"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert len(fake.calls) == 3
+    assert "no sandbox" in fake.calls[2][0]
+
+
+def test_router_answer_turn_passes_normal_prose_through() -> None:
+    fake = ToolCallingCopilotClient(
+        ["NO_TOOL_NEEDED", "The tests pass and nothing needs changing."]
+    )
+    client = _router_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Any changes needed?"}],
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "The tests pass and nothing needs changing."
+    assert len(fake.calls) == 2
+
+
+def test_final_confabulation_retry_drops_the_quoted_refusal() -> None:
+    refusal = "I cannot access your local files. Please paste the file content."
+    fake = ToolCallingCopilotClient(
+        [
+            refusal,
+            '```tool_call\n{"name": "read_file", "arguments": {"path": "main.py"}}\n```',
+        ]
+    )
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SAMPLE_TOOLS,
+            "messages": [{"role": "user", "content": "Read main.py"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+    retry_prompt, retry_context = fake.calls[1]
+    assert "This is your final attempt" in retry_prompt
+    assert not any(refusal in part for part in retry_context)
+    assert any("Original request:" in part for part in retry_context)
 
 
 def test_router_mode_repairs_malformed_selection() -> None:

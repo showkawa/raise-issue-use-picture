@@ -26,7 +26,8 @@ _CONFAB_RES = [
         r"\b(?:attach|mount)(?:ed|ing)? (?:or \w+ )?(?:the |your )?(?:repositor(?:y|ies)|repo|workspace|codebase)\b",
         r"/mnt\b",
         r"\bnot (?:inside )?a git repository\b",
-        r"\b(?:not available|unavailable) in this (?:chat|session|conversation|environment)\b",
+        r"\b(?:not available|unavailable) in this (?:chat|session|conversation|environment|turn)\b",
+        r"\b(?:not|n'?t) (?:available|exposed|accessible) to the (?:available |active |current )?(?:filesystem |file |execution )?tools\b",
         r"\bcan.?t (?:directly )?use the (?:external|client.side|provided)\b[^.]{0,40}\btools?\b",
         r"\btools? (?:described|listed|mentioned) in your message\b",
         r"\b(?:could not|couldn.?t|cannot|can.?t|failed to) (?:be )?(?:run|executed?)\b",
@@ -45,7 +46,7 @@ _CONFAB_RES = [
         (
             r"\b(?:path|repositor(?:y|ies)|project|director(?:y|ies)|workspace|files?)\b"
             r"[^.]{0,60}\b(?:is|are|was|were)(?: not|n'?t) "
-            r"(?:exposed|surfaced|visible|mounted|reachable|present)\b"
+            r"(?:exposed|surfaced|visible|mounted|reachable|present|available|accessible)\b"
         ),
         (
             r"\bI (?:could not|couldn.?t|cannot|can.?t|am unable to|was unable to) (?:safely )?"
@@ -97,7 +98,18 @@ def detect_hallucinated_completion(text: str) -> bool:
     return any(pattern.search(text) for pattern in _HALLUCINATED_RES)
 
 
-def guard_retry_prompt(guard: str) -> str:
+_FINAL_ATTEMPT_CLAUSE = (
+    " This is your final attempt: your previous reply was rejected and will not be "
+    "shown to the user, so restate nothing from it. Any reply that is not a single "
+    "fenced tool_call block fails the turn."
+)
+
+
+def guard_retry_prompt(guard: str, *, strict: bool = False) -> str:
+    return _guard_retry_prompt(guard) + (_FINAL_ATTEMPT_CLAUSE if strict else "")
+
+
+def _guard_retry_prompt(guard: str) -> str:
     if guard == HOSTED_FILE_LINK:
         return (
             "You produced a hosted/server-side file link instead of writing the file "

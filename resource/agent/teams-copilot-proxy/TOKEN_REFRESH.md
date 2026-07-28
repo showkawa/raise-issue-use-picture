@@ -1,78 +1,68 @@
-# Token Refresh Automation Options
+# Token Refresh Automation
 
-The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admin consent is blocked, so tokens cannot be obtained programmatically via MSAL device code flow. Browser automation is required.
+The proxy needs a short-lived user JWT for the
+`substrate.office.com` WebSocket API. It supports two implemented refresh paths:
 
-> Note: once a valid token is available, the server also runs a startup capability probe
-> (tone tests + fenced tool probe, see `M365_STARTUP_PROBE` in the README). This happens after
-> token capture/refresh and adds some startup time roughly once per 24h (cached in
-> `.probe_cache.json`).
+1. **OAuth 2.0 + PKCE** — preferred when the tenant accepts the bundled public
+   client and requested scopes. A cached `refresh_token` lets the proxy renew
+   the substrate access token without keeping Chrome open.
+2. **Chrome CDP capture** — fallback for a signed-in dedicated Chrome profile.
+   The proxy extracts the access token from a live Copilot WebSocket.
 
-## Current manual flow
+The OAuth path is tenant-dependent. If sign-in or refresh is rejected by
+Microsoft Entra, use the CDP path or the manual fallback below.
+
+> After a token is available, `serve` may run the startup capability probe
+> (`M365_STARTUP_PROBE`). Its result is cached in `.probe_cache.json` for
+> `M365_PROBE_TTL_SECONDS` (24 hours by default).
+
+## OAuth 2.0 + PKCE (preferred)
+
+Interactive sign-in opens a browser and asks you to paste the redirect URL:
 
 ```bat
-uv run teams-copilot-proxy set-token
-REM paste full WebSocket URL from DevTools -> Network -> substrate WebSocket -> Headers
+uv run teams-copilot-proxy login
 ```
 
----
+For a headless environment, use device code sign-in:
 
-## Option A — Playwright (recommended)
-
-Launch a hidden browser using the existing Chrome user profile (already authenticated). Navigate to M365 Copilot, intercept the WebSocket connection, extract the token, update `.env`, restart the server.
-
-**Pros:** fully automatic, works even if Chrome is not open  
-**Cons:** requires `playwright` + `playwright install chrome`, takes ~5s per refresh
-
-Implementation sketch:
-```python
-from playwright.async_api import async_playwright
-
-async def get_fresh_token() -> str:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch_persistent_context(
-            user_data_dir="C:/Users/<user>/AppData/Local/Google/Chrome/User Data",
-            channel="chrome",
-            headless=True,
-        )
-        token = None
-        page = await browser.new_page()
-        async def on_websocket(ws):
-            nonlocal token
-            m = re.search(r"access_token=([^&]+)", ws.url)
-            if m:
-                token = m.group(1)
-        page.on("websocket", on_websocket)
-        await page.goto("https://m365.cloud.microsoft/chat")
-        await page.wait_for_timeout(5000)
-        await browser.close()
-        return token
+```bat
+uv run teams-copilot-proxy login-device
 ```
 
-Schedule with `schedule` or `apscheduler` every 50 minutes.
+Both commands save the token set, including the `refresh_token`, to
+`.oauth_tokens.json` and publish the current access token to `.env` as
+`M365_ACCESS_TOKEN`. The cache is git-ignored and should be treated like a
+password.
 
----
+Once the cache exists, `serve` tries an OAuth refresh at startup and prefers
+OAuth during its background refresh loop. Force a one-off refresh with:
 
-## Option B — Chrome remote debugging (CDP)
+```bat
+uv run teams-copilot-proxy oauth-refresh
+```
 
-Launch a dedicated Chrome profile with the remote debugging flag, then connect to it via CDP.
+If the refresh token is revoked or the tenant rejects the OAuth flow, run
+`login` or `login-device` again, or use the CDP fallback.
 
-**Start the server:**
+## Chrome CDP capture
+
+Start the server normally:
+
 ```bat
 uv run teams-copilot-proxy serve
 ```
 
-`serve` opens the dedicated debug Chrome window by default. Sign in to M365 Copilot in that window once.
-The profile is stored under
-`%USERPROFILE%\.teams-copilot-proxy\chrome-profile`, so later launches can reuse the sign-in.
-Then the server connects to `http://localhost:9222` and extracts the token from the Copilot tab.
-`uv run teams-copilot-proxy serve` starts an auto-refresh loop by default. It refreshes when the
-current JWT has less than 5 minutes left.
-If the current token is missing, expired, or not a Substrate token, `serve` first tries the same `r`-style
-refresh from the current debug Chrome tab. If no Substrate token is available yet, it starts a one-shot
-startup capture listener. Generate a new WebSocket by pressing `F5` in the debug Chrome Copilot tab, clicking
-the message box, and typing one character. The message does not need to be sent.
+It launches a dedicated Chrome profile at
+`%USERPROFILE%\.teams-copilot-proxy\chrome-profile`. Sign in to M365 Copilot
+there once. The server refreshes before expiry by reading a new WebSocket
+token from that profile.
 
-Useful serve flags:
+If startup capture is waiting for a token, press `F5` in the dedicated Copilot
+tab, click the message box, and type one character. Do not send the message.
+
+Useful flags:
+
 ```bat
 uv run teams-copilot-proxy serve --refresh-before-seconds 300
 uv run teams-copilot-proxy serve --no-launch-chrome
@@ -80,21 +70,33 @@ uv run teams-copilot-proxy serve --no-capture-on-start
 uv run teams-copilot-proxy serve --no-auto-refresh
 ```
 
-**Pros:** lightweight, uses `websockets` (already installed), works even if normal Chrome is already open  
-**Cons:** requires a separate Chrome profile; less reliable if the Copilot tab is closed
+`--no-auto-refresh` disables both OAuth and Chrome background refresh.
+`--no-launch-chrome` only suppresses launching Chrome; it does not disable
+OAuth refresh or CDP capture if a debug Chrome instance is already available.
 
----
+## Manual fallback
 
-## Option C — Windows WAM / MSAL broker
+```bat
+uv run teams-copilot-proxy set-token
+```
 
-`msal` with `allow_broker=True` on Windows 10/11 uses the OS-level Web Account Manager. Investigated but **not viable** — WAM token caches are per-app and the `substrate.office.com` resource requires pre-authorization (`AADSTS65002`), which blocks even cached token reuse from external client IDs.
+Paste the full WebSocket URL from DevTools:
 
----
+1. Open the signed-in M365 Copilot Chrome window.
+2. Open DevTools (`F12`) and select **Network**.
+3. Filter for `substrate`.
+4. Select the WebSocket entry.
+5. In **Headers**, copy the full **Request URL**.
+6. Paste it into the terminal.
 
-## Option D — Admin consent (cleanest long-term fix)
+The command extracts `access_token` and writes it to `.env`.
 
-Ask the IT admin to either:
-1. Register a new Entra app and grant delegated Graph permissions (original approach), or
-2. Grant admin consent for the `Microsoft Graph Command Line Tools` app (`14d82eec-...`)
+## Health checks
 
-Either removes the need for token automation entirely.
+```bat
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/v1/token/status
+```
+
+Both endpoints report token validity and remaining lifetime. `/healthz` also
+reports the startup capability result when one is available.

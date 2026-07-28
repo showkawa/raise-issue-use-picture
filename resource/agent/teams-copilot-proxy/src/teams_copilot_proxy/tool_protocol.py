@@ -19,6 +19,14 @@ _ANY_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+# The mirror image: a reply whose closing ``` is there but whose opening
+# ```tool_call line lost its backticks, leaving the label glued to the prose.
+# Without recovery the whole call reads as prose and the write silently never
+# happens, which the model then reports as completed work.
+_UNOPENED_TOOL_CALL_RE = re.compile(
+    r"(?:^|[^`\w])(?P<marker>tool_call)[ \t]*\r?\n(?P<body>\{.*)", re.DOTALL
+)
+
 # An opening tool_call fence that is never closed: the hallmark of an upstream
 # reply cut off mid-argument (typically a large file inlined into write/apply_patch).
 _TOOL_CALL_FENCE_OPEN_RE = re.compile(
@@ -27,6 +35,15 @@ _TOOL_CALL_FENCE_OPEN_RE = re.compile(
 )
 
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
+
+# OpenCode advertises its skills as an XML block inside the prompt text, not in
+# the skill tool's schema, so the catalogue can only be recovered from there.
+_AVAILABLE_SKILLS_RE = re.compile(
+    r"<available_skills>(?P<body>.*?)</available_skills>", re.DOTALL
+)
+_SKILL_NAME_RE = re.compile(r"<name>\s*(?P<name>[^<]+?)\s*</name>")
+
+SKILL_TOOL_NAME = "skill"
 
 TRUNCATED_ERROR_PREFIX = "tool_call block appears truncated"
 
@@ -236,6 +253,36 @@ def validate_tool_arguments(
     return None
 
 
+def available_skill_names(text: str) -> set[str]:
+    """Skill names from the ``<available_skills>`` catalogue in the prompt."""
+    names: set[str] = set()
+    for block in _AVAILABLE_SKILLS_RE.finditer(text):
+        for match in _SKILL_NAME_RE.finditer(block.group("body")):
+            names.add(match.group("name"))
+    return names
+
+
+def validate_skill_call(
+    name: str, arguments: dict[str, Any], skills: set[str]
+) -> str | None:
+    """Check a ``skill`` call against the catalogue the client advertised.
+
+    The skill tool declares its ``name`` argument as a free-form string, so an
+    invented skill passes schema validation and only fails at the client, which
+    costs a full round trip. Only runs when a catalogue was actually parsed, so
+    a prompt without the block never rejects a call.
+    """
+    if name != SKILL_TOOL_NAME or not skills:
+        return None
+    requested = arguments.get("name")
+    if not isinstance(requested, str) or requested in skills:
+        return None
+    return (
+        f'skill "{requested}" does not exist; the available skills are: '
+        f"{', '.join(sorted(skills))}"
+    )
+
+
 def tool_reminder(tools: list[dict[str, Any]], allow_parallel: bool = False) -> str:
     """A short, high-recency reminder appended after the user prompt so the tool
     format survives long, instruction-dense contexts that bury the protocol header."""
@@ -317,6 +364,9 @@ def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
         fenced = _try_fenced_json(cleaned, allowed_names)
         if fenced is not None:
             return fenced
+        unopened = _try_unopened_tool_call(cleaned, allowed_names)
+        if unopened is not None:
+            return unopened
         shell = _try_shell_fallback(cleaned, allowed_names)
         if shell is not None:
             return shell
@@ -391,6 +441,45 @@ def _try_truncated_tool_call(cleaned: str) -> ToolParseOutcome | None:
             ),
         )
     return None
+
+
+def _try_unopened_tool_call(
+    cleaned: str, allowed_names: set[str]
+) -> ToolParseOutcome | None:
+    """Recover a tool call whose opening ``tool_call`` fence lost its backticks.
+
+    Requires the ``tool_call`` label on its own trailing position followed by a
+    JSON object naming an available tool, so prose that merely mentions the word
+    is never turned into a call. A body that names a tool but does not parse is
+    reported as truncated rather than leaked as prose: silently dropping it makes
+    the client believe a write happened when nothing ran.
+    """
+    match = _UNOPENED_TOOL_CALL_RE.search(cleaned)
+    if match is None:
+        return None
+    body = match.group("body").strip()
+    if '"name"' not in body:
+        return None
+    leading = cleaned[: match.start("marker")].strip()
+    payload, exc = _loads_tool_json(body)
+    if exc is not None:
+        return ToolParseOutcome(
+            text=cleaned.strip(),
+            error=(
+                f"{TRUNCATED_ERROR_PREFIX}: the reply ended mid-JSON "
+                f"({exc.msg} at line {exc.lineno} column {exc.colno}), so the "
+                "arguments were cut off by the output length limit"
+            ),
+        )
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or (allowed_names and name not in allowed_names):
+        return None
+    outcome = _validate_payload(payload, allowed_names, leading, cleaned)
+    if outcome.error is None:
+        outcome.source = "unopened_fence"
+    return outcome
 
 
 def _try_fenced_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome | None:

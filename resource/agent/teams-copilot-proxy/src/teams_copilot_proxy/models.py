@@ -96,4 +96,7 @@ class TranslatedRequest(BaseModel):
     tools: list[dict[str, Any]] | None = None
     # Names of the context parts injected into the prompt (Monitor telemetry).
     injections: list[str] = Field(default_factory=list)
+    # Bytes of tool-protocol boilerplate re-sent upstream on every turn: the
+    # share of the payload that is template rather than conversation.
+    protocol_bytes: int = 0
 

@@ -114,15 +114,35 @@ def test_turn_telemetry_records_frames_types_and_clean_termination(monkeypatch) 
     assert text == "final answer"
     turn = client.last_turn
     assert turn is not None
-    assert turn.frames == len(CHAT_FRAMES)
+    assert turn.frames == len(CHAT_FRAMES) - 1
+    assert turn.heartbeats == 1
     assert turn.message_types == ["Progress", "Chat"]
     assert turn.citations == 1
     assert turn.terminated_cleanly is True
+    assert turn.connect_ms is not None
     assert turn.first_frame_ms is not None
+    assert turn.first_text_ms is not None
+    assert turn.last_text_ms is not None
+    assert turn.tone == client.tone
     assert turn.sent_bytes == len("hello")
     assert turn.reply_bytes == len("final answer")
     assert turn.close_reason is None
     assert "final answer" in (turn.final_frame or "")
+
+
+def test_heartbeat_frames_are_excluded_from_first_frame_timing(monkeypatch) -> None:
+    """A SignalR ping ahead of the first content frame used to be timed as the
+    upstream's first output, which made first_frame_ms measure the handshake."""
+    ws = FakeWebSocket([{"type": 6}, {"type": 6}] + CHAT_FRAMES[1:])
+    monkeypatch.setattr(sc.websockets, "connect", connect_returning(ws))
+    client = build_client()
+
+    asyncio.run(client.chat("hello", []))
+
+    turn = client.last_turn
+    assert turn is not None
+    assert turn.heartbeats == 2
+    assert turn.frames == len(CHAT_FRAMES) - 1
 
 
 def test_turn_telemetry_marks_unclean_close_when_upstream_cuts_the_stream(
