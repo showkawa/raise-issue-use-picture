@@ -781,6 +781,8 @@ def test_requests_table_migration_adds_telemetry_columns(tmp_path) -> None:
             "injections",
             "conversation_id",
             "client_request_id",
+            "images",
+            "option_sets",
             "sent_bytes",
             "first_frame_ms",
             "frames",
@@ -834,6 +836,8 @@ class TelemetryCopilotClient(FakeCopilotClient):
             citations=2,
             terminated_cleanly=True,
             message_types=["Progress", "Chat"],
+            images=1,
+            option_sets=7,
         )
         turn.mark_sent("x" * 3000)
         self.last_turn = turn
@@ -913,6 +917,8 @@ def test_attempt_records_upstream_turn_facts(tmp_path) -> None:
     assert attempt["citations"] == 2
     assert attempt["terminated_cleanly"] == 1
     assert attempt["sent_bytes"] == 3000
+    assert attempt["images"] == 1
+    assert attempt["option_sets"] == 7
 
 
 def test_upstream_prompt_capture_is_gated_by_capture_mode(tmp_path) -> None:

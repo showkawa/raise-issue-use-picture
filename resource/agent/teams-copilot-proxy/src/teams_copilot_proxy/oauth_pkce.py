@@ -35,9 +35,6 @@ from .token_store import decode_jwt_payload
 # This client is registered with the "nativeclient" redirect and is allowed to
 # request the substrate/sydney scopes through the public PKCE flow.
 DEFAULT_CLIENT_ID = "c0ab8ce9-e9a0-42e7-b064-33d422df41f1"
-# FOCI family client usable for the device-code flow when the primary client
-# rejects it.
-FOCI_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
 DEFAULT_AUTHORITY = "https://login.microsoftonline.com/common"
 DEFAULT_SCOPE = (
     "openid profile offline_access "

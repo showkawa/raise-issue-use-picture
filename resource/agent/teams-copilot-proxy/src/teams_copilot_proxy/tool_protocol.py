@@ -126,10 +126,6 @@ class ToolParseOutcome:
         """First parsed tool call, or None. Kept for the single-tool code paths."""
         return self.tool_calls[0] if self.tool_calls else None
 
-    @property
-    def looks_like_attempt(self) -> bool:
-        return self.error is not None
-
 
 def render_tool_instructions(
     tools: list[dict[str, Any]], allow_parallel: bool = False

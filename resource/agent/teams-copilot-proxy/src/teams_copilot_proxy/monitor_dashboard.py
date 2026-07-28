@@ -219,12 +219,15 @@ async function showDetail(id) {
       + `<td>${a.text ? '<pre>' + esc(a.text) + '</pre>' : '<span class="muted">not captured</span>'}</td></tr>`
     ).join('') + '</table>';
   html += '<h2>Upstream (M365)</h2><table><tr><th>#</th><th>conversation</th><th>req id</th>'
+    + '<th>imgs</th><th>optsets</th>'
     + '<th>sent B</th><th>1st frame ms</th><th>frames</th><th>msg types</th>'
     + '<th>reply B</th><th>cites</th><th>clean end</th><th>status</th><th>close</th>'
     + '<th>injections</th></tr>'
     + d.attempts.map(a =>
       `<tr><td>${a.seq}</td><td>${esc((a.conversation_id || '').slice(0, 12))}</td>`
-      + `<td>${esc((a.client_request_id || '').slice(0, 8))}</td><td>${a.sent_bytes ?? ''}</td>`
+      + `<td>${esc((a.client_request_id || '').slice(0, 8))}</td>`
+      + `<td>${a.images ?? ''}</td><td>${a.option_sets ?? ''}</td>`
+      + `<td>${a.sent_bytes ?? ''}</td>`
       + `<td>${a.first_frame_ms ?? ''}</td><td>${a.frames ?? ''}</td>`
       + `<td>${esc(a.message_types || '')}</td><td>${a.reply_bytes ?? ''}</td>`
       + `<td>${a.citations ?? ''}</td>`

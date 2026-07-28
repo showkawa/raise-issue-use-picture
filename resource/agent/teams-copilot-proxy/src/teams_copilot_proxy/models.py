@@ -88,21 +88,6 @@ class SamplingParams(BaseModel):
         return options
 
 
-class CopilotMessage(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: str | None = None
-    text: str = ""
-    attributions: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class CopilotConversation(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: str
-    messages: list[CopilotMessage] = Field(default_factory=list)
-
-
 class TranslatedRequest(BaseModel):
     prompt: str
     additional_context: list[str] = Field(default_factory=list)

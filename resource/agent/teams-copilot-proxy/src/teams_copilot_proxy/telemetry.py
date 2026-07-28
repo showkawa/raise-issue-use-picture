@@ -23,8 +23,6 @@ _TAIL_LIMIT = 2048
 class TurnTelemetry:
     conversation_id: str = ""
     client_request_id: str = ""
-    substrate_session_id: str = ""
-    start_of_session: bool = False
     images: int = 0
     option_sets: int = 0
     sent_bytes: int = 0

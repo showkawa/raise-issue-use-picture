@@ -343,8 +343,6 @@ class SubstrateCopilotClient:
         turn = TurnTelemetry(
             conversation_id=conv_id,
             client_request_id=req_id,
-            substrate_session_id=session_id,
-            start_of_session=is_start_of_session,
             images=len(annotations or []),
             option_sets=len(_OPTIONS_SETS) + (1 if annotations else 0),
         )

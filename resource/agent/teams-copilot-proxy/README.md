@@ -413,6 +413,8 @@ Primary key `(request_id, seq)`. One row per substrate round trip; a single requ
 | `injections` | TEXT | Context parts injected for this specific attempt (a correction attempt differs from the first). |
 | `conversation_id` | TEXT | Substrate conversation id — for cross-checking against upstream and for session reuse. |
 | `client_request_id` | TEXT | Per-round-trip request id sent to substrate. |
+| `images` | INTEGER | Image annotations attached to this round trip. |
+| `option_sets` | INTEGER | Number of substrate `optionsSets` flags sent (grows by one when images are attached). |
 | `sent_bytes` | INTEGER | Bytes of the prompt the proxy actually sent upstream. |
 | `first_frame_ms` | INTEGER | Latency to the first upstream WebSocket frame. |
 | `frames` | INTEGER | Number of upstream frames received. |

@@ -703,15 +703,11 @@ def _build_agent_ledger(messages: Sequence[OpenAIMessage]) -> _AgentLedger:
     return _AgentLedger(completed, repeated_call, repeated_failure)
 
 
-def _agent_ledger_hint(messages: Sequence[OpenAIMessage]) -> str | None:
+def _format_agent_ledger_hint(ledger: _AgentLedger) -> str | None:
     """Compact evidence ledger injected before the next model turn: which calls
     already completed (so they are final evidence and must not be repeated) plus
     a strategy-change nudge when the transcript is looping. Purely additive
     context that never blocks the request."""
-    return _format_agent_ledger_hint(_build_agent_ledger(messages))
-
-
-def _format_agent_ledger_hint(ledger: _AgentLedger) -> str | None:
     if not ledger.completed and not ledger.repeated_call:
         return None
     evidence = [

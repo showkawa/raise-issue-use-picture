@@ -118,6 +118,8 @@ class AttemptRecord:
     # proxy → M365 与 M365 → proxy 的往返事实（来自 TurnTelemetry）。
     conversation_id: str | None = None
     client_request_id: str | None = None
+    images: int | None = None
+    option_sets: int | None = None
     sent_bytes: int | None = None
     first_frame_ms: int | None = None
     frames: int | None = None
@@ -137,6 +139,8 @@ class AttemptRecord:
         """Copy one substrate round trip's facts onto this attempt."""
         self.conversation_id = turn.conversation_id or None
         self.client_request_id = turn.client_request_id or None
+        self.images = turn.images
+        self.option_sets = turn.option_sets
         self.sent_bytes = turn.sent_bytes
         self.first_frame_ms = turn.first_frame_ms
         self.frames = turn.frames
@@ -684,6 +688,8 @@ class SQLiteSink:
                     injections TEXT,
                     conversation_id TEXT,
                     client_request_id TEXT,
+                    images INTEGER,
+                    option_sets INTEGER,
                     sent_bytes INTEGER,
                     first_frame_ms INTEGER,
                     frames INTEGER,
@@ -756,6 +762,8 @@ class SQLiteSink:
                 "injections": "TEXT",
                 "conversation_id": "TEXT",
                 "client_request_id": "TEXT",
+                "images": "INTEGER",
+                "option_sets": "INTEGER",
                 "sent_bytes": "INTEGER",
                 "first_frame_ms": "INTEGER",
                 "frames": "INTEGER",
@@ -889,17 +897,19 @@ class SQLiteSink:
                     INSERT OR REPLACE INTO attempts (
                         request_id, seq, duration_ms, guard, retried, status,
                         text, error_detail, phase, injections, conversation_id,
-                        client_request_id, sent_bytes, first_frame_ms, frames,
+                        client_request_id, images, option_sets, sent_bytes,
+                        first_frame_ms, frames,
                         message_types, reply_bytes, citations, terminated_cleanly,
                         upstream_status, close_reason, final_frame, sent_head,
                         sent_tail, response_text
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         rec.id, a.seq, a.duration_ms, a.guard,
                         1 if a.retried else 0, a.status, a.text,
                         a.error_detail, a.phase, a.injections, a.conversation_id,
-                        a.client_request_id, a.sent_bytes, a.first_frame_ms,
+                        a.client_request_id, a.images, a.option_sets,
+                        a.sent_bytes, a.first_frame_ms,
                         a.frames, a.message_types, a.reply_bytes, a.citations,
                         _flag(a.terminated_cleanly), a.upstream_status,
                         a.close_reason, a.final_frame, a.sent_head, a.sent_tail,
@@ -961,10 +971,13 @@ class SQLiteSink:
         或执行结果没进下一轮 transcript，会话就此断在工具调用上（无收尾）。"""
         if not rec.session_key:
             return
+        # ts is compared inclusively and the current request excluded by id: on
+        # coarse clocks two consecutive turns can share the same timestamp.
         rows = self._conn.execute(
             "SELECT call_id, name FROM tool_calls WHERE session_key = ? "
-            "AND ts < ? AND result_bytes IS NULL AND COALESCE(unclosed, 0) = 0",
-            (rec.session_key, rec.ts),
+            "AND ts <= ? AND request_id != ? "
+            "AND result_bytes IS NULL AND COALESCE(unclosed, 0) = 0",
+            (rec.session_key, rec.ts, rec.id),
         ).fetchall()
         for call_id, name in rows:
             self._conn.execute(

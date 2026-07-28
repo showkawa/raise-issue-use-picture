@@ -24,11 +24,11 @@ from .oauth_pkce import (
     OAuthError,
     TokenCache,
     build_authorization_url,
+    ensure_valid_token,
     exchange_code,
     generate_pkce_verifier,
     parse_redirect_code,
     poll_device_code,
-    refresh_access_token,
     start_device_code,
 )
 from .token_store import decode_jwt_payload, is_substrate_token_claims
@@ -318,7 +318,10 @@ def _auto_refresh_loop(
             continue
 
         print(f"Token expires in {max(remaining, 0)} seconds; refreshing...")
-        if not _try_oauth_refresh() and not _try_auto_refresh(cdp_port):
+        if (
+            not _try_oauth_refresh(skew_seconds=refresh_before_seconds)
+            and not _try_auto_refresh(cdp_port)
+        ):
             print("Auto-refresh failed; will retry later.")
         stop_event.wait(retry_seconds)
 
@@ -351,21 +354,26 @@ def _oauth_config_and_cache() -> tuple[OAuthConfig, TokenCache]:
     return config, TokenCache(settings.oauth_cache_path)
 
 
-def _try_oauth_refresh() -> bool:
-    """Refresh the substrate token via a cached OAuth refresh_token (browserless)."""
+def _try_oauth_refresh(*, skew_seconds: int = 60) -> bool:
+    """Publish a valid substrate token from the OAuth cache (browserless).
+
+    Only spends the refresh_token when the cached access_token expires within
+    ``skew_seconds``; otherwise the cached one is republished as-is.
+    """
 
     config, cache = _oauth_config_and_cache()
-    current = cache.load()
-    if not current or not current.refresh_token:
-        return False
+    previous = cache.load()
     try:
-        token_set = refresh_access_token(config, current.refresh_token, previous=current)
+        token_set = ensure_valid_token(config, cache, skew_seconds=skew_seconds)
     except OAuthError as exc:
-        print(f"OAuth refresh failed: {exc}")
+        if exc.error != "no_cached_token":
+            print(f"OAuth refresh failed: {exc}")
         return False
-    cache.save(token_set)
     _write_token(token_set.access_token)
-    print("Token refreshed via OAuth refresh_token.")
+    if previous is not None and token_set.access_token == previous.access_token:
+        print("Cached OAuth access token still valid; reused.")
+    else:
+        print("Token refreshed via OAuth refresh_token.")
     return True
 
 

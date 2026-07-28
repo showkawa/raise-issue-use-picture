@@ -2400,7 +2400,7 @@ def test_parallel_reply_with_duplicate_blocks_is_deduped_end_to_end() -> None:
 
 
 def test_agent_ledger_hint_lists_completed_calls() -> None:
-    from teams_copilot_proxy.app import _agent_ledger_hint
+    from teams_copilot_proxy.app import _build_agent_ledger, _format_agent_ledger_hint
     from teams_copilot_proxy.models import (
         OpenAIMessage,
         OpenAIToolCall,
@@ -2424,7 +2424,7 @@ def test_agent_ledger_hint_lists_completed_calls() -> None:
         OpenAIMessage(role="tool", tool_call_id="c1", content="print('ok')"),
         OpenAIMessage(role="user", content="continue"),
     ]
-    hint = _agent_ledger_hint(messages)
+    hint = _format_agent_ledger_hint(_build_agent_ledger(messages))
     assert hint is not None
     assert "EVIDENCE_LEDGER" in hint
     assert "read_file" in hint
@@ -2432,11 +2432,11 @@ def test_agent_ledger_hint_lists_completed_calls() -> None:
 
 
 def test_agent_ledger_hint_none_without_tool_history() -> None:
-    from teams_copilot_proxy.app import _agent_ledger_hint
+    from teams_copilot_proxy.app import _build_agent_ledger, _format_agent_ledger_hint
     from teams_copilot_proxy.models import OpenAIMessage
 
     messages = [OpenAIMessage(role="user", content="hi")]
-    assert _agent_ledger_hint(messages) is None
+    assert _format_agent_ledger_hint(_build_agent_ledger(messages)) is None
 
 
 def _router_client(fake: FakeCopilotClient) -> TestClient:
