@@ -4,7 +4,7 @@ Give [OpenCode](https://opencode.ai) full coding capabilities backed by Microsof
 
 This project runs a local FastAPI proxy that talks to the same `substrate.office.com` WebSocket API used by the M365 Copilot web UI, then exposes it to OpenCode as an OpenAI-compatible `/v1/chat/completions` endpoint.
 
-**Scope:** this proxy is built and tuned specifically for OpenCode 1.18.4. It is not intended to support other clients (e.g. Codex or Claude Code); the OpenAI Responses (`/v1/responses`) and Anthropic Messages (`/v1/messages`) endpoints have been removed.
+**Scope:** this proxy is built and tuned for OpenCode 1.18.x (validated with 1.18.7). It is not intended to support other clients (e.g. Codex or Claude Code); the OpenAI Responses (`/v1/responses`) and Anthropic Messages (`/v1/messages`) endpoints have been removed.
 
 No Azure app registration. No admin consent. Sign in with your normal M365 Copilot browser session.
 
@@ -33,7 +33,7 @@ No Azure app registration. No admin consent. Sign in with your normal M365 Copil
 - Drives OpenCode's agentic coding loop from M365 Copilot
 - Works with your existing signed-in Copilot web session
 - Runs locally on `127.0.0.1` by default
-- Auto-captures and refreshes the short-lived browser token
+- Automatically obtains and refreshes the short-lived substrate token through OAuth PKCE or Chrome CDP capture
 - Supports persistent Copilot sessions across turns
 - Emulated tool calling on `/v1/chat/completions`, so OpenCode can read files, run commands, and edit code
 - Image/vision input: OpenCode image attachments are uploaded to the substrate and described by the model (GPT-5 / reasoning tones)
@@ -135,9 +135,9 @@ The full multi-model config (Claude Sonnet plus GPT-5 chat/reasoning tones, with
 
 For persistent Copilot-side conversation memory, use a `:persist` model id (e.g. `claude-sonnet:persist`).
 
-**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. Malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. The retry allowance is **per failure mode**, not shared: a redirect guard (`hosted_file_link`, `confabulation`, `hallucinated_completion`), a malformed block (`tool_parse_failure`), a reply cut off mid-argument (`tool_output_truncated`) and a safety-filter `disengaged` each get their own `M365_TOOL_CORRECTION_RETRIES` budget, so an early redirect can no longer consume the retry a later failure needs. A truncated call — typically a whole file inlined into one `write`/`apply_patch` argument that hit the upstream output limit — is never re-asked with the same payload; the retry tells the model to write a smaller portion and continue in later turns. A `skill` call is additionally checked against the `<available_skills>` catalogue OpenCode puts in the prompt: the skill tool declares its `name` as a free-form string, so an invented skill passes schema validation and only fails at the client a full round trip later — the proxy rejects it up front and re-asks with the real skill names. The check is skipped when the prompt carries no catalogue, so a truncated transcript never blocks a legitimate call. Parallel tool calls (several `tool_call` blocks in one reply, emitted as multiple OpenAI `tool_calls`) are enabled per tone via `M365_PARALLEL_TOOL_TONES` (default `Claude_Sonnet`, the tone that reliably emits them) and can be forced on for every tone with `M365_ALLOW_PARALLEL_TOOL_CALLS=true`; the GPT-5.x reasoning tones keep the single-tool-per-turn path by default because they tend to refuse or disengage when asked for several at once.
+**Tool calling:** when OpenCode sends `tools`, the proxy injects the tool list into the prompt, asks Copilot to answer with a fenced ```tool_call JSON block, and translates it back into standard OpenAI `tool_calls`. Tools are executed locally by OpenCode; Copilot never touches your files directly. Malformed tool replies are re-asked (see `M365_TOOL_CORRECTION_RETRIES`) and, if they still cannot be parsed, the proxy returns a stable Failure Sentinel instead of leaking raw model text. The retry allowance is **per failure mode**, not shared: a redirect guard (`hosted_file_link`, `confabulation`, `hallucinated_completion`), a malformed block (`tool_parse_failure`), a reply cut off mid-argument (`tool_output_truncated`) and a safety-filter `disengaged` each get their own `M365_TOOL_CORRECTION_RETRIES` budget, so an early redirect can no longer consume the retry a later failure needs. A truncated call — typically a whole file inlined into one `write`/`apply_patch` argument that hit the upstream output limit — is never re-asked with the same payload; the retry tells the model to write a smaller portion and continue in later turns. Parallel tool calls (several `tool_call` blocks in one reply, emitted as multiple OpenAI `tool_calls`) are enabled per tone via `M365_PARALLEL_TOOL_TONES` (default `Claude_Sonnet`, the tone that reliably emits them) and can be forced on for every tone with `M365_ALLOW_PARALLEL_TOOL_CALLS=true`; the GPT-5.x reasoning tones keep the single-tool-per-turn path by default because they tend to refuse or disengage when asked for several at once.
 
-**Tool planning mode (`M365_TOOL_PLANNING_MODE`, ported opt-in from [HEXUXIU/M365-Copilot2API](https://github.com/HEXUXIU/M365-Copilot2API)):** `single` (default) resolves the tool call and/or the answer in one model turn. `router` runs a dedicated tool-*selection* turn first — the model must reply with the `tool_call` block(s) or the explicit `NO_TOOL_NEEDED` sentinel and nothing else — and only makes a second turn for the natural-language answer when no tool is needed. This stops a reasoning tone from answering in prose while silently dropping the call it needed, at the cost of one extra substrate round trip on no-tool turns. The selection turn reuses the full single-mode engine (shell-fence recovery, in-reply de-duplication, JSON-schema pre-validation, the `M365_TOOL_CORRECTION_RETRIES` repair budget, and the confabulation/disengagement guards). The answer turn runs the redirect guards as well and, when one fires, falls back to a tool-selection turn: a "the repository is not exposed to my environment" refusal in the answer phase would otherwise be handed to the client as a perfectly normal answer — a silent failure that no metric counts. Keep the default `single` and use the Monitor's per-`planning_mode` metrics to decide whether `router` is worth enabling on your traffic.
+**Tool planning mode (`M365_TOOL_PLANNING_MODE`, ported opt-in from [HEXUXIU/M365-Copilot2API](https://github.com/HEXUXIU/M365-Copilot2API)):** `single` (default) resolves the tool call and/or the answer in one model turn. `router` runs a dedicated tool-*selection* turn first — the model must reply with the `tool_call` block(s) or the explicit `NO_TOOL_NEEDED` sentinel and nothing else — and only makes a second turn for the natural-language answer when no tool is needed. This stops a reasoning tone from answering in prose while silently dropping the call it needed, at the cost of one extra substrate round trip on no-tool turns. The selection turn reuses the full single-mode engine (shell-fence recovery, in-reply de-duplication, JSON-schema pre-validation, the `M365_TOOL_CORRECTION_RETRIES` repair budget, and the confabulation/disengagement guards). Keep the default `single` and use the Monitor's per-`planning_mode` metrics to decide whether `router` is worth enabling on your traffic.
 
 **Reasoning tones (GPT-5.x Reasoning):** [examples/opencode.json](examples/opencode.json) defaults the coding model to `gpt-5-6-reasoning` (with `gpt-5-5-chat` as `small_model` for titles/summaries). Reasoning tones tend to think in prose before acting and sometimes wrap the tool JSON in a mislabelled ```json (or unlabelled) fence, or refuse by claiming the repository is "not accessible in the workspace". Two mechanisms make them reliable for OpenCode's tool loop: (1) the parser recovers a tool call from a single mislabelled fence when no ```tool_call fence is present, tolerating leading reasoning text; (2) the confabulation guard detects sandbox / "/mnt/data" / "can't locate the repository" / "make the repository available" style refusals and re-asks for a tool call. Local reliability probes on `Gpt_5_6_Reasoning` hit tool calls on `/init` repo scans, single-file reads, and symbol greps, and drive multi-turn read/list loops without sandbox refusals.
 
@@ -198,7 +198,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions ^
 
 ## Token Management
 
-M365 Copilot browser tokens usually expire in about 1 hour. The proxy refreshes them from the dedicated signed-in Chrome window.
+M365 Copilot access tokens usually expire in about 1 hour. The proxy prefers OAuth PKCE refresh when a cached `.oauth_tokens.json` is available and falls back to the dedicated signed-in Chrome window.
 
 ### Refresh
 
@@ -301,7 +301,7 @@ Example:
 | `POST /v1/chat/completions` | OpenAI Chat Completions (the endpoint OpenCode uses), streaming and tool calling supported |
 | `GET /monitor` | Read-only monitoring dashboard (static page; loopback clients need no token, remote data calls need the Bearer token) |
 | `GET /monitor/api/session` | Dashboard bootstrap: current substrate token status (masked, never the full value) |
-| `GET /monitor/api/token` | Full current substrate token — loopback clients only (dashboard “copy token” button) |
+| `GET /monitor/api/token` | Full current substrate token for an authenticated monitor client (dashboard "copy token" button); loopback clients may be unauthenticated when `M365_MONITOR_LOOPBACK_OPEN=true` |
 | `GET /monitor/api/summary` | Aggregate counters: requests, tokens, error/guard rates, tone breakdown |
 | `GET /monitor/api/requests` | Recent requests (`?limit=`, `?session=` — matches the OpenCode session id or the derived key, `?project=`, `?turn_kind=`) |
 | `GET /monitor/api/requests/{id}` | One request with its full attempt chain |
@@ -327,7 +327,7 @@ What is recorded:
 - **Tool-planning telemetry:** for every request that carries `tools`, the proxy records `planning_mode` (`single` or, when `M365_TOOL_PLANNING_MODE=router`, `router`), whether the round yielded a tool call, how many attempts/corrections it took, and how often the recovery mechanisms fired — shell-fence/bare-command recovery (`shell_recovered`), in-reply de-duplication (`deduped`), and the ledger's repeated-call / repeated-failure flags. This is stored as additive columns and never changes chat behavior.
 - **OpenCode request shape:** the client's real `x-session-id` and `User-Agent`, the derived `project_path` (from the stated working directory, else the common prefix of the absolute paths in the transcript), `turn_kind` (`tool` / `title` / `summary` / `chat`, so agent turns are not averaged with OpenCode's title side-requests), message count, transcript/system bytes, `context_pct` of `M365_CONTEXT_LIMIT`, sampling parameters, tool count, per-flavour `tool_kinds` (`builtin:8,mcp:3`) and a `tools_fingerprint` for correlating tool-list changes with behaviour changes.
 - **Injected context parts:** which components the proxy actually added to the turn (`tool_protocol`, `system_sanitized`, `transcript`, `transcript_truncated`, `evidence_ledger`, `json_mode`, `router_select`, `correction:<guard>`, …) — recorded per request and per attempt, so a bad turn no longer has to be reverse-engineered from the reply.
-- **Upstream round-trip facts (per attempt):** substrate conversation id and client request id, the tone used, sent prompt bytes, the connect / first-content-frame / first-text / last-text timeline, frame and heartbeat counts, the substrate `messageType`s received, reply bytes, Bing citation count, whether the stream **terminated cleanly**, and the upstream status / close reason when it did not. A truncated turn is now visible directly instead of being inferred from half-parsed JSON.
+- **Upstream round-trip facts (per attempt):** substrate conversation id and client request id, sent prompt bytes, first-frame latency, frame count, the substrate `messageType`s received, reply bytes, Bing citation count, whether the stream **terminated cleanly**, and the upstream status / close reason when it did not. A truncated turn is now visible directly instead of being inferred from half-parsed JSON.
 - **Stream health:** first-chunk latency, chunk count, average interval, and `[DONE]` completeness as aggregates (no per-chunk rows).
 - **Error timeline:** guard hits, throttling, disengagement, and other upstream failures.
 
@@ -383,14 +383,9 @@ Columns marked **(capture)** are content excerpts, only retained per the `M365_M
 | `client_agent` | TEXT | Client `User-Agent` (e.g. `opencode/1.18.5 ...`). Real traffic is distinguishable from test traffic here. |
 | `project_path` | TEXT | Project directory being worked on: the stated working directory, else the common prefix of absolute paths in the transcript. |
 | `turn_kind` | TEXT | `tool`, `title`, `summary` or `chat` — keeps OpenCode's side-requests out of agent-turn metrics. |
-| `turn_index` | INTEGER | 1-based position of this request within its session — for plotting latency and payload against conversation depth. |
 | `messages_count` | INTEGER | Number of messages in the incoming request. |
 | `transcript_bytes` | INTEGER | Byte size of the flattened prior conversation. |
 | `system_bytes` | INTEGER | Byte size of the system prompt received from OpenCode. |
-| `protocol_bytes` | INTEGER | Byte size of the tool-protocol boilerplate (instructions + reminder) re-sent every turn — the share of the payload that is template rather than conversation. |
-| `keepalive_count` | INTEGER | Keepalive comments streamed to OpenCode while the tool round trip was still resolving, i.e. how long the user waited with nothing on screen. |
-| `build` | TEXT | Package version plus short commit of the running proxy; latency is only comparable within one build. |
-| `config_fp` | TEXT | Readable fingerprint of the latency-relevant settings (`plan=`/`tone=`/`transcript=`/`corr=`/`chunk=`/`ka=`/`throttle=`). No secrets. |
 | `context_pct` | REAL | Share of `M365_CONTEXT_LIMIT` consumed by this turn. |
 | `tools_count` | INTEGER | Number of tool definitions sent by the client. |
 | `tool_kinds` | TEXT | Per-flavour breakdown, e.g. `builtin:8,mcp:3`. |
@@ -418,15 +413,11 @@ Primary key `(request_id, seq)`. One row per substrate round trip; a single requ
 | `injections` | TEXT | Context parts injected for this specific attempt (a correction attempt differs from the first). |
 | `conversation_id` | TEXT | Substrate conversation id — for cross-checking against upstream and for session reuse. |
 | `client_request_id` | TEXT | Per-round-trip request id sent to substrate. |
-| `tone` | TEXT | Tone this attempt actually used — the router may run `select` and `answer` on different tones, so the request-level tone is not enough. |
 | `images` | INTEGER | Image annotations attached to this round trip. |
 | `option_sets` | INTEGER | Number of substrate `optionsSets` flags sent (grows by one when images are attached). |
 | `sent_bytes` | INTEGER | Bytes of the prompt the proxy actually sent upstream. |
-| `connect_ms` | INTEGER | Time to a usable channel: WebSocket connect plus SignalR handshake, before the prompt goes out. |
-| `first_frame_ms` | INTEGER | Latency to the first upstream **content** frame (SignalR heartbeats excluded — counting them made this measure the handshake). |
-| `first_text_ms` / `last_text_ms` | INTEGER | Latency to the first and last piece of reply text; their difference is generation time as opposed to waiting time. |
-| `frames` | INTEGER | Number of upstream content frames received. |
-| `heartbeats` | INTEGER | Number of SignalR ping frames received. |
+| `first_frame_ms` | INTEGER | Latency to the first upstream WebSocket frame. |
+| `frames` | INTEGER | Number of upstream frames received. |
 | `message_types` | TEXT | CSV of substrate `messageType`s seen, e.g. `EscapeHatch,Chat,ReferencesListComplete`. |
 | `reply_bytes` | INTEGER | Bytes of assembled reply text. |
 | `citations` | INTEGER | Number of Bing citations in the reply. |
@@ -516,14 +507,14 @@ Most users only need `.env` after the proxy captures a token.
 - The proxy listens on `127.0.0.1` by default.
 - The browser token is stored locally in `.env`.
 - `.env`, `.venv/`, and Python cache files are ignored by Git.
-- The proxy does not send your token to any external service besides Microsoft 365 Copilot's own `substrate.office.com` endpoint.
+- The proxy sends OAuth authorization and token requests to Microsoft identity endpoints when using `login`, `login-device`, or refresh; it sends the resulting access token to Microsoft 365 Copilot's `substrate.office.com` endpoint. No third-party service is required by the proxy.
 - Anyone who can read your `.env` can use the token until it expires. Treat it like a secret.
 
 ## Limitations
 
 - This is an unofficial local proxy over the browser-facing M365 Copilot API.
-- Token refresh depends on a signed-in Chrome profile.
-- Built for OpenCode 1.18.4 only; other clients (Codex, Claude Code) are not supported.
+- Token refresh normally uses OAuth PKCE; Chrome CDP capture remains the fallback when OAuth is unavailable.
+- Built for OpenCode 1.18.x (validated with 1.18.7); other clients (Codex, Claude Code) are not supported.
 - Tool calls are emulated via prompting on `/v1/chat/completions` (parallel calls per-tone via `M365_PARALLEL_TOOL_TONES`, default `Claude_Sonnet`, or forced on for all tones with `M365_ALLOW_PARALLEL_TOOL_CALLS`; the reasoning tones stay single-tool-per-turn; with tools the body is buffered upstream, then streamed to the client as typewriter chunks).
 - Sampling params (`temperature`/`top_p`) are forwarded best-effort but the substrate chat channel may ignore them; `top_k`/`max_tokens` have no substrate equivalent, and `reasoning_effort` is emulated by tone routing (no true per-request effort control).
 - Guard detection is heuristic; on T3 tiers (no Claude tone) tool calling is best-effort and unreliable.
