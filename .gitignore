@@ -3,6 +3,7 @@ dist/
 output/
 *.lockb
 .sisyphus/
+.scratch/
 /**/docs/
 /**/issues/
 .probe_cache.json

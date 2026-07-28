@@ -347,6 +347,8 @@ def test_tool_call_recorded_and_closed_by_next_turn(tmp_path) -> None:
             "calls": 1,
             "closed": 0,
             "errors": 0,
+            "empty_results": 0,
+            "unclosed": 0,
             "result_bytes": 0,
             "error_rate": 0.0,
         }
@@ -383,6 +385,77 @@ def test_tool_call_recorded_and_closed_by_next_turn(tmp_path) -> None:
     )
     tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
     assert tools[0]["calls"] == 1
+    assert tools[0]["closed"] == 1
+
+
+def _tool_followup(call: dict, content: str) -> dict:
+    return {
+        "model": "claude-sonnet",
+        "tools": SAMPLE_TOOLS,
+        "messages": [
+            {"role": "user", "content": "Read main.py"},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": call["id"], "content": content},
+        ],
+    }
+
+
+def test_empty_tool_result_is_flagged(tmp_path) -> None:
+    """工具跑通但结果近乎为空（webfetch 抓到十几字节、glob 零命中）要能看见。"""
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-empty"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+
+    assert (
+        client.post(
+            "/v1/chat/completions", json=_tool_followup(call, "No files"), headers=headers
+        ).status_code
+        == 200
+    )
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    empty = [e for e in errors if e["type"] == "empty_tool_result"]
+    assert empty and "read returned 8B" in empty[0]["detail"]
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["empty_results"] == 1
+    assert tools[0]["errors"] == 0
+
+
+def test_tool_call_without_result_is_flagged_unclosed(tmp_path) -> None:
+    """下一轮 transcript 没带回结果 = OpenCode 没收尾，会话断在工具调用上。"""
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-unclosed"}
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+
+    errors = client.get("/monitor/api/errors", headers=AUTH).json()["errors"]
+    unclosed = [e for e in errors if e["type"] == "tool_call_unclosed"]
+    assert unclosed and unclosed[0]["detail"].startswith("read (")
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["unclosed"] == 1
+
+
+def test_late_tool_result_clears_unclosed_flag(tmp_path) -> None:
+    fake = ScriptedCopilotClient([GOOD_TOOL_REPLY, "done", "done"])
+    client = build_monitor_client(fake, tmp_path)
+    headers = {"x-session-id": "s-late"}
+    body = chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    call = body["choices"][0]["message"]["tool_calls"][0]
+    chat(client, headers=headers, tools=SAMPLE_TOOLS)
+    assert client.get("/monitor/api/tools", headers=AUTH).json()["tools"][0]["unclosed"] == 1
+
+    assert (
+        client.post(
+            "/v1/chat/completions",
+            json=_tool_followup(call, "x" * 200),
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    tools = client.get("/monitor/api/tools", headers=AUTH).json()["tools"]
+    assert tools[0]["unclosed"] == 0
     assert tools[0]["closed"] == 1
 
 

@@ -2158,13 +2158,23 @@ def test_example_opencode_config_parses_and_declares_tool_call() -> None:
 
 
 def test_reasoning_effort_routes_chat_tone_to_reasoning_sibling() -> None:
-    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "high") == "Gpt_5_5_Reasoning"
-    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "medium") == "Gpt_5_5_Reasoning"
-    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "low") == "Gpt_5_5_Chat"
-    assert _tone_for_model("claude-sonnet", "Claude_Sonnet", "xhigh") == "Claude_Sonnet_Reasoning"
-    assert _tone_for_model("gpt-quick", "Claude_Sonnet", "high") == "Gpt_Reasoning"
+    # A bare or aliased id carries no tone choice, so effort may promote it.
+    assert _tone_for_model("gpt-5-5", "Claude_Sonnet", "high") == "Gpt_5_5_Reasoning"
+    assert _tone_for_model("gpt-5-5", "Claude_Sonnet", "low") == "Gpt_5_5_Chat"
+    assert _tone_for_model("some-unknown-model", "Gpt_5_5_Chat", "medium") == "Gpt_5_5_Reasoning"
     # Explicit reasoning ids are never downgraded by a low/none effort.
     assert _tone_for_model("gpt-5-6-reasoning", "Claude_Sonnet", "low") == "Gpt_5_6_Reasoning"
+
+
+def test_explicit_chat_model_id_is_not_promoted_by_client_effort() -> None:
+    # OpenCode sends reasoning_effort=medium on every turn; that must not turn a
+    # deliberately picked chat model into its slower reasoning sibling.
+    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "medium") == "Gpt_5_5_Chat"
+    assert _tone_for_model("gpt-5-5-chat", "Claude_Sonnet", "high") == "Gpt_5_5_Chat"
+    assert _tone_for_model("claude-sonnet", "Claude_Sonnet", "xhigh") == "Claude_Sonnet"
+    assert _tone_for_model("gpt-quick", "Claude_Sonnet", "high") == "Gpt_Quick"
+    # Asking for the effort in the id itself is still an explicit upgrade.
+    assert _tone_for_model("gpt-5-5-chat-high", "Claude_Sonnet") == "Gpt_5_5_Reasoning"
 
 
 def test_effort_suffix_on_model_id_selects_reasoning_tone() -> None:

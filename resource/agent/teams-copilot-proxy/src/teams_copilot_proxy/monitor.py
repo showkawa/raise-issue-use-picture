@@ -34,6 +34,11 @@ _REQUEST_BODY_LIMIT = 16384
 _RESPONSE_TEXT_LIMIT = 8192
 _TOOL_ARGS_LIMIT = 4096
 
+# 工具「跑通了但基本没产出」的判定阈值：结果体不超过这么多字节且未报错，
+# 说明模型拿到的是空壳结果（webfetch 抓到 17B、glob 零命中等），它往往会
+# 据此继续推理并得出错误结论，所以单独派生一条事件。
+_EMPTY_TOOL_RESULT_BYTES = 48
+
 # 请求最终状态
 STATUS_OK = "ok"
 STATUS_GUARD = "guard"
@@ -647,7 +652,8 @@ class SQLiteSink:
                     arguments TEXT,
                     result_error INTEGER,
                     result_bytes INTEGER,
-                    result_head TEXT
+                    result_head TEXT,
+                    unclosed INTEGER
                 )
                 """
             )
@@ -770,6 +776,7 @@ class SQLiteSink:
             {
                 "arguments": "TEXT",
                 "result_head": "TEXT",
+                "unclosed": "INTEGER",
             },
         )
 
@@ -873,7 +880,8 @@ class SQLiteSink:
                     ),
                 )
             for result in rec.tool_results:
-                self._close_tool_call(rec.session_key, result)
+                self._close_tool_call(rec, result)
+            self._flag_unclosed_tool_calls(rec)
             self._derive_events(rec)
             for a in rec.attempts:
                 self._conn.execute(
@@ -902,17 +910,20 @@ class SQLiteSink:
         if self._writes % 50 == 0:
             self.cleanup()
 
-    def _close_tool_call(self, session_key: str | None, result: ToolResultRecord) -> None:
+    def _close_tool_call(self, rec: RequestRecord, result: ToolResultRecord) -> None:
         """把工具结果配对回未闭环的 tool_call：优先 call_id，其次同会话同名最早一条；
         配不上则留空（OpenCode 每轮重发全量 transcript，只更新未闭环行即可天然去重）。"""
+        session_key = rec.session_key
         error_flag = 1 if result.is_error else 0
         if result.call_id:
             cursor = self._conn.execute(
                 "UPDATE tool_calls SET result_error = ?, result_bytes = ?, "
-                "result_head = ? WHERE call_id = ? AND result_bytes IS NULL",
+                "result_head = ?, unclosed = 0 "
+                "WHERE call_id = ? AND result_bytes IS NULL",
                 (error_flag, result.result_bytes, result.head, result.call_id),
             )
             if cursor.rowcount:
+                self._flag_empty_result(rec, result)
                 return
             # call_id 已闭环（transcript 重发）或未知：尝试名称配对前先确认未闭环过
             known = self._conn.execute(
@@ -930,9 +941,45 @@ class SQLiteSink:
         if row:
             self._conn.execute(
                 "UPDATE tool_calls SET result_error = ?, result_bytes = ?, "
-                "result_head = ? WHERE call_id = ?",
+                "result_head = ?, unclosed = 0 WHERE call_id = ?",
                 (error_flag, result.result_bytes, result.head, row[0]),
             )
+            self._flag_empty_result(rec, result)
+
+    def _flag_empty_result(self, rec: RequestRecord, result: ToolResultRecord) -> None:
+        """工具成功但结果近乎为空：模型会拿着空壳结果继续推理，单独记一条事件。"""
+        if result.is_error or result.result_bytes > _EMPTY_TOOL_RESULT_BYTES:
+            return
+        self._insert_event(
+            rec,
+            "empty_tool_result",
+            f"{result.name or 'unknown'} returned {result.result_bytes}B",
+        )
+
+    def _flag_unclosed_tool_calls(self, rec: RequestRecord) -> None:
+        """本轮之前发出的 tool_call 到现在仍没有结果回灌 —— OpenCode 没有执行它、
+        或执行结果没进下一轮 transcript，会话就此断在工具调用上（无收尾）。"""
+        if not rec.session_key:
+            return
+        rows = self._conn.execute(
+            "SELECT call_id, name FROM tool_calls WHERE session_key = ? "
+            "AND ts < ? AND result_bytes IS NULL AND COALESCE(unclosed, 0) = 0",
+            (rec.session_key, rec.ts),
+        ).fetchall()
+        for call_id, name in rows:
+            self._conn.execute(
+                "UPDATE tool_calls SET unclosed = 1 WHERE call_id = ?", (call_id,)
+            )
+            self._insert_event(
+                rec, "tool_call_unclosed", f"{name or 'unknown'} ({call_id})"
+            )
+
+    def _insert_event(self, rec: RequestRecord, event_type: str, detail: str | None) -> None:
+        self._conn.execute(
+            "INSERT INTO events (ts, request_id, session_key, type, detail) "
+            "VALUES (?,?,?,?,?)",
+            (rec.ts, rec.id, rec.session_key, event_type, detail),
+        )
 
     def _derive_events(self, rec: RequestRecord) -> None:
         """从请求记录派生错误/守卫时间线事件。"""
@@ -950,11 +997,7 @@ class SQLiteSink:
         ):
             events.append(("stream_incomplete", None))
         for event_type, detail in events:
-            self._conn.execute(
-                "INSERT INTO events (ts, request_id, session_key, type, detail) "
-                "VALUES (?,?,?,?,?)",
-                (rec.ts, rec.id, rec.session_key, event_type, detail),
-            )
+            self._insert_event(rec, event_type, detail)
 
     def cleanup(self) -> None:
         if not self.retention_days or self.retention_days <= 0:
@@ -1077,11 +1120,18 @@ class SQLiteSink:
                     SUM(CASE WHEN result_bytes IS NOT NULL THEN 1 ELSE 0 END)
                         AS closed,
                     SUM(CASE WHEN result_error = 1 THEN 1 ELSE 0 END) AS errors,
+                    SUM(
+                        CASE WHEN result_error = 0
+                             AND result_bytes <= :empty_limit
+                        THEN 1 ELSE 0 END
+                    ) AS empty_results,
+                    SUM(CASE WHEN unclosed = 1 THEN 1 ELSE 0 END) AS unclosed,
                     COALESCE(SUM(result_bytes), 0) AS result_bytes
                 FROM tool_calls
                 GROUP BY name, category
                 ORDER BY calls DESC
-                """
+                """,
+                {"empty_limit": _EMPTY_TOOL_RESULT_BYTES},
             ).fetchall()
             tools = []
             for row in rows:

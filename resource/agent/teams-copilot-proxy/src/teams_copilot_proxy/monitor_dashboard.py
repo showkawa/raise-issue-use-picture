@@ -162,8 +162,8 @@ async function renderSummary() {
   html += '<h2>Tones</h2><table><tr><th>tone</th><th>requests</th></tr>'
     + s.tones.map(t => `<tr><td>${esc(t.tone)}</td><td>${t.count}</td></tr>`).join('')
     + '</table>';
-  html += '<h2>Tools</h2><table><tr><th>tool</th><th>category</th><th>calls</th><th>closed</th><th>errors</th><th>error rate</th></tr>'
-    + tools.tools.map(t => `<tr><td>${esc(t.name)}</td><td>${esc(t.category)}</td><td>${t.calls}</td><td>${t.closed}</td><td>${t.errors}</td><td>${(t.error_rate * 100).toFixed(1)}%</td></tr>`).join('')
+  html += '<h2>Tools</h2><table><tr><th>tool</th><th>category</th><th>calls</th><th>closed</th><th>errors</th><th>error rate</th><th>empty results</th><th>unclosed</th></tr>'
+    + tools.tools.map(t => `<tr><td>${esc(t.name)}</td><td>${esc(t.category)}</td><td>${t.calls}</td><td>${t.closed}</td><td>${t.errors}</td><td>${(t.error_rate * 100).toFixed(1)}%</td><td>${t.empty_results}</td><td>${t.unclosed}</td></tr>`).join('')
     + '</table>';
   content.innerHTML = html;
 }

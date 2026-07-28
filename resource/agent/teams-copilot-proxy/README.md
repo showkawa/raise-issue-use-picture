@@ -93,7 +93,7 @@ The model id selects the Copilot tone. The full routable catalog (also advertise
 | `gpt-5-4-chat` / `gpt-5-4-reasoning` | `gpt-5.4` / `gpt-5.4-reasoning` | `Gpt_5_4_*` | yes | yes |
 | `gpt-quick` / `gpt-reasoning` | `quick` / `think-deeper` | `Gpt_Quick` / `Gpt_Reasoning` | yes | yes |
 
-Dots are normalized to hyphens, a bare GPT id routes to its chat sibling (`gpt-5-6` has no chat sibling and routes to the reasoning tone), and every model accepts the `reasoning_effort` request field or a `-none`/`-minimal`/`-low`/`-medium`/`-high`/`-xhigh` id suffix — `medium`/`high`/`xhigh` upgrade a chat tone to its reasoning sibling, while explicit `*-reasoning` ids are never downgraded. Ids not in the catalog fall back to the `claude`/`gpt`/`magic` prefix rules, then to `M365_DEFAULT_TONE` (or the tone chosen by the startup probe). Whether a given tone actually works depends on your tenant; the startup probe tests the main ones and `/healthz` reports the result.
+Dots are normalized to hyphens, a bare GPT id routes to its chat sibling (`gpt-5-6` has no chat sibling and routes to the reasoning tone), and every model accepts the `reasoning_effort` request field or a `-none`/`-minimal`/`-low`/`-medium`/`-high`/`-xhigh` id suffix — `medium`/`high`/`xhigh` upgrade a chat tone to its reasoning sibling unless the id already spells the tone out (`gpt-5-5-chat` stays on chat), while explicit `*-reasoning` ids are never downgraded. Ids not in the catalog fall back to the `claude`/`gpt`/`magic` prefix rules, then to `M365_DEFAULT_TONE` (or the tone chosen by the startup probe). Whether a given tone actually works depends on your tenant; the startup probe tests the main ones and `/healthz` reports the result.
 
 Recommended: drop a project-level `opencode.json` in your repo root. It declares the proxy as a custom provider with `tool_call: true`, which is **required** â€” without it OpenCode will not send tool definitions and the agent loop cannot run:
 
@@ -143,7 +143,7 @@ For persistent Copilot-side conversation memory, use a `:persist` model id (e.g.
 
 **Sampling parameters:** OpenCode's `temperature` and `top_p` are forwarded best-effort into the substrate request's `options` object. The Copilot chat channel exposes no documented sampling controls (the tone fixes the model and decoding), so these may be silently ignored upstream; they are never faked. `top_k` and `max_tokens` are parsed but not forwarded (no substrate equivalent).
 
-**Reasoning effort:** the substrate has no effort knob — the tone fixes the model and its reasoning depth — so `reasoning_effort` is emulated by tone routing: `medium`/`high`/`xhigh` upgrade a chat tone to its reasoning sibling (`gpt-5-5-chat` → `Gpt_5_5_Reasoning`, `claude-sonnet` → `Claude_Sonnet_Reasoning`, `gpt-quick` → `Gpt_Reasoning`); `none`/`minimal`/`low` keep the chat tone; explicit `*-reasoning` model ids are never downgraded. The effort can also be given as a model-id suffix (e.g. `gpt-5-5-chat-high`); the request's `reasoning_effort` field wins when both are present. Beyond the probed tones, the extended catalog also routes `gpt-5-2-chat`, `gpt-5-2-reasoning`, `gpt-5-3-chat`, `gpt-5-4-chat`, `gpt-5-4-reasoning`, `gpt-quick`, `gpt-reasoning`, and `claude-sonnet-reasoning` by model id (not probed at startup; availability depends on your tenant).
+**Reasoning effort:** the substrate has no effort knob — the tone fixes the model and its reasoning depth — so `reasoning_effort` is emulated by tone routing: `medium`/`high`/`xhigh` upgrade a chat tone to its reasoning sibling (`gpt-5-5` → `Gpt_5_5_Reasoning`, an unlisted id falling back to `M365_DEFAULT_TONE=Claude_Sonnet` → `Claude_Sonnet_Reasoning`); `none`/`minimal`/`low` keep the chat tone; explicit `*-reasoning` model ids are never downgraded. A model id that names its tone (`gpt-5-5-chat`, `claude-sonnet`, `gpt-quick`) is a deliberate choice and is **never** promoted by the request's effort field — OpenCode sends `reasoning_effort=medium` on every turn, which would otherwise silently swap the model you picked. The effort can also be given as a model-id suffix (e.g. `gpt-5-5-chat-high`); the request's `reasoning_effort` field wins when both are present. Beyond the probed tones, the extended catalog also routes `gpt-5-2-chat`, `gpt-5-2-reasoning`, `gpt-5-3-chat`, `gpt-5-4-chat`, `gpt-5-4-reasoning`, `gpt-quick`, `gpt-reasoning`, and `claude-sonnet-reasoning` by model id (not probed at startup; availability depends on your tenant).
 
 **Tool-argument schema pre-validation:** parsed tool calls are checked against the tool's JSON schema (required keys, top-level property types, `additionalProperties: false`) before being returned to OpenCode; violations are re-asked on the correction-retry budget instead of wasting a full client round trip. The check is deliberately shallow so a rejection is always a genuine schema violation.
 
@@ -441,6 +441,7 @@ Primary key `(request_id, seq)`. One row per substrate round trip; a single requ
 | `result_error` | INTEGER | 1 when OpenCode reported the execution as an error; NULL until the result comes back on a later turn. |
 | `result_bytes` | INTEGER | Byte size of the tool result; NULL means the call is still unclosed. |
 | `result_head` | TEXT **(capture)** | First 512 B of a **failed** tool result only; NULL for successful results. |
+| `unclosed` | INTEGER | 1 when a later turn in the same session arrived without ever returning this call's result — the client never executed it or dropped it from the transcript. Reset to 0 if the result shows up late. |
 
 #### `events`
 
@@ -452,8 +453,10 @@ Derived at write time (not emitted separately), so it never contains anything th
 | `ts` | REAL | Timestamp of the originating request. |
 | `request_id` | TEXT | FK to `requests.id`. |
 | `session_key` | TEXT | Session the event belongs to. |
-| `type` | TEXT | `guard` (one per guard-triggering attempt), the request's `error_type` (`throttled` / `disengaged` / `bad_request` / `upstream_error`), or `stream_incomplete` when a streaming request never emitted `[DONE]`. |
-| `detail` | TEXT | Guard name (with ` (retried)` appended when a correction followed) or the error message. |
+| `type` | TEXT | `guard` (one per guard-triggering attempt), the request's `error_type` (`throttled` / `disengaged` / `bad_request` / `upstream_error`), `stream_incomplete` when a streaming request never emitted `[DONE]`, `empty_tool_result` when a tool succeeded but returned ≤48 B (a `webfetch` that fetched nothing, a zero-hit `glob`), or `tool_call_unclosed` when a call never got a result back. |
+| `detail` | TEXT | Guard name (with ` (retried)` appended when a correction followed), the error message, `<tool> returned <N>B`, or `<tool> (<call_id>)`. |
+
+The `empty_tool_result` / `tool_call_unclosed` pair covers the two silent failures that otherwise look like a healthy `status=ok` turn: the model reasoning on top of an empty tool result, and a session that simply stops at a tool call. Both are also aggregated per tool in `/monitor/api/tools` (`empty_results` / `unclosed` columns in the dashboard's Tools table).
 
 Note: `POST /monitor/api/clear` (the dashboard's **clear db** button) truncates all four tables. Rows older than `M365_MONITOR_RETENTION_DAYS` are deleted automatically.
 

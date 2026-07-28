@@ -187,6 +187,11 @@ def _tone_for_model(
         if _model_id_for_tone(known) == base:
             tone = known
             break
+    # A model id that spells out its tone (e.g. `gpt-5-5-chat`) is an explicit
+    # choice: a client-sent effort must not silently promote it to the reasoning
+    # sibling. An effort suffix on the id itself (`gpt-5-5-chat-high`) still does,
+    # because the caller asked for it in the same breath.
+    explicit_tone = tone is not None and suffix_effort is None
     if tone is None:
         tone = _MODEL_ALIASES.get(base)
     if tone is None:
@@ -196,7 +201,7 @@ def _tone_for_model(
                 break
     if tone is None:
         tone = default_tone
-    if effort in _UPGRADE_EFFORTS:
+    if effort in _UPGRADE_EFFORTS and not explicit_tone:
         tone = _REASONING_SIBLING.get(tone, tone)
     return tone
 
