@@ -7,6 +7,7 @@ Seam：FastAPI app + fake substrate client + TestClient——发真实的
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 
@@ -284,6 +285,40 @@ def test_streaming_request_recorded(tmp_path) -> None:
     assert entry["stream"] == 1
     assert entry["status"] == "ok"
     assert entry["completion_tokens"] > 0
+
+
+def test_streamed_completion_id_matches_recorded_request_id(tmp_path) -> None:
+    tool_reply = '```tool_call\n{"name": "read", "arguments": {"filePath": "a.py"}}\n```'
+    client = build_monitor_client(ScriptedCopilotClient([tool_reply]), tmp_path)
+    body = ""
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "stream": True,
+            "messages": [{"role": "user", "content": "read config.py"}],
+            "tools": SAMPLE_TOOLS,
+        },
+    ) as response:
+        for piece in response.iter_text():
+            body += piece
+    plain = ""
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "claude-sonnet",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as response:
+        for piece in response.iter_text():
+            plain += piece
+
+    requests = client.get("/monitor/api/requests", headers=AUTH).json()["requests"]
+    assert json.loads(plain.splitlines()[0][6:])["id"] == requests[0]["id"]
+    assert json.loads(body.splitlines()[0][6:])["id"] == requests[1]["id"]
 
 
 def test_session_header_takes_priority_over_conversation_key(tmp_path) -> None:

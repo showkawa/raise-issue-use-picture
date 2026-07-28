@@ -483,6 +483,7 @@ def create_app(
                             input_text=input_text,
                             recorder=recorder,
                             planning_mode=planning_mode,
+                            completion_id=request_id,
                         ),
                         media_type="text/event-stream",
                     )
@@ -495,6 +496,7 @@ def create_app(
                         session,
                         input_text=input_text,
                         recorder=recorder,
+                        completion_id=request_id,
                     ),
                     media_type="text/event-stream",
                 )
@@ -1141,8 +1143,9 @@ async def _openai_stream_with_tools(
     input_text: str = "",
     recorder=_NULL_RECORDER,
     planning_mode: str = "single",
+    completion_id: str | None = None,
 ) -> AsyncIterator[str]:
-    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    completion_id = completion_id or f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
 
     def chunk(delta: dict, finish_reason: str | None = None, extra: dict | None = None) -> str:
@@ -1252,8 +1255,9 @@ async def _openai_stream(
     session: PersistentSession | None = None,
     input_text: str = "",
     recorder=_NULL_RECORDER,
+    completion_id: str | None = None,
 ) -> AsyncIterator[str]:
-    completion_id = f"chatcmpl_{uuid.uuid4().hex}"
+    completion_id = completion_id or f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
     started = recorder.attempt_timer()
