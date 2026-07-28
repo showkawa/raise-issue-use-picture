@@ -19,6 +19,14 @@ _ANY_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+# The mirror image: a reply whose closing ``` is there but whose opening
+# ```tool_call line lost its backticks, leaving the label glued to the prose.
+# Without recovery the whole call reads as prose and the write silently never
+# happens, which the model then reports as completed work.
+_UNOPENED_TOOL_CALL_RE = re.compile(
+    r"(?:^|[^`\w])(?P<marker>tool_call)[ \t]*\r?\n(?P<body>\{.*)", re.DOTALL
+)
+
 # An opening tool_call fence that is never closed: the hallmark of an upstream
 # reply cut off mid-argument (typically a large file inlined into write/apply_patch).
 _TOOL_CALL_FENCE_OPEN_RE = re.compile(
@@ -356,6 +364,9 @@ def parse_model_output(text: str, allowed_names: set[str]) -> ToolParseOutcome:
         fenced = _try_fenced_json(cleaned, allowed_names)
         if fenced is not None:
             return fenced
+        unopened = _try_unopened_tool_call(cleaned, allowed_names)
+        if unopened is not None:
+            return unopened
         shell = _try_shell_fallback(cleaned, allowed_names)
         if shell is not None:
             return shell
@@ -430,6 +441,45 @@ def _try_truncated_tool_call(cleaned: str) -> ToolParseOutcome | None:
             ),
         )
     return None
+
+
+def _try_unopened_tool_call(
+    cleaned: str, allowed_names: set[str]
+) -> ToolParseOutcome | None:
+    """Recover a tool call whose opening ``tool_call`` fence lost its backticks.
+
+    Requires the ``tool_call`` label on its own trailing position followed by a
+    JSON object naming an available tool, so prose that merely mentions the word
+    is never turned into a call. A body that names a tool but does not parse is
+    reported as truncated rather than leaked as prose: silently dropping it makes
+    the client believe a write happened when nothing ran.
+    """
+    match = _UNOPENED_TOOL_CALL_RE.search(cleaned)
+    if match is None:
+        return None
+    body = match.group("body").strip()
+    if '"name"' not in body:
+        return None
+    leading = cleaned[: match.start("marker")].strip()
+    payload, exc = _loads_tool_json(body)
+    if exc is not None:
+        return ToolParseOutcome(
+            text=cleaned.strip(),
+            error=(
+                f"{TRUNCATED_ERROR_PREFIX}: the reply ended mid-JSON "
+                f"({exc.msg} at line {exc.lineno} column {exc.colno}), so the "
+                "arguments were cut off by the output length limit"
+            ),
+        )
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or (allowed_names and name not in allowed_names):
+        return None
+    outcome = _validate_payload(payload, allowed_names, leading, cleaned)
+    if outcome.error is None:
+        outcome.source = "unopened_fence"
+    return outcome
 
 
 def _try_fenced_json(cleaned: str, allowed_names: set[str]) -> ToolParseOutcome | None:

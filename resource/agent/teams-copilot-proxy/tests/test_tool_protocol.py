@@ -148,3 +148,45 @@ def test_parse_still_accepts_standard_tool_call() -> None:
     outcome = parse_model_output(text, {"read"})
     assert outcome.error is None
     assert outcome.tool_calls[0].name == "read"
+
+
+def test_parse_tool_call_whose_opening_fence_lost_its_backticks() -> None:
+    """The recorded shape: prose glued to a bare `tool_call` label, JSON, closing fence.
+
+    Dropping it leaves the client with prose only, so the write never runs while
+    the model reports it as done on the next turn.
+    """
+    patch_text = "*** Begin Patch\n*** Update File: AGENTS.md\n+hello\n*** End Patch"
+    body = json.dumps(
+        {"name": "apply_patch", "arguments": {"patchText": patch_text}},
+        ensure_ascii=False,
+    )
+    text = f"Making only the two justified additions.tool_call\n{body}\n```"
+    outcome = parse_model_output(text, {"apply_patch", "read"})
+    assert outcome.error is None
+    assert outcome.source == "unopened_fence"
+    assert len(outcome.tool_calls) == 1
+    assert outcome.tool_calls[0].name == "apply_patch"
+    assert outcome.tool_calls[0].arguments == {"patchText": patch_text}
+    assert outcome.text == "Making only the two justified additions."
+
+
+def test_unopened_tool_call_cut_off_mid_json_is_reported_truncated() -> None:
+    body = json.dumps(
+        {"name": "apply_patch", "arguments": {"patchText": "*** Begin Patch\n+a"}},
+        ensure_ascii=False,
+    )[:-4]
+    outcome = parse_model_output(f"Applying the patch.tool_call\n{body}", {"apply_patch"})
+    assert outcome.error is not None
+    assert outcome.error.startswith("tool_call block appears truncated")
+
+
+def test_prose_mentioning_tool_call_is_not_turned_into_a_call() -> None:
+    text = (
+        "Emit a tool_call\n"
+        '{"example": true} to run a tool; I am not calling one right now.'
+    )
+    outcome = parse_model_output(text, {"apply_patch", "read"})
+    assert outcome.error is None
+    assert outcome.tool_calls == []
+    assert outcome.text == text
