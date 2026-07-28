@@ -68,6 +68,7 @@ from .request_facts import (
 from .tool_protocol import (
     TOOL_FAILURE_SENTINEL,
     ToolParseOutcome,
+    available_skill_names,
     correction_prompt,
     dedupe_tool_calls,
     is_truncated_tool_call_error,
@@ -76,6 +77,7 @@ from .tool_protocol import (
     tool_names,
     tool_schemas,
     truncation_retry_prompt,
+    validate_skill_call,
     validate_tool_arguments,
 )
 from .translator import (
@@ -923,6 +925,7 @@ async def _chat_resolving_tools(
         )
     allowed = tool_names(tools)
     schemas = tool_schemas(tools)
+    skills = available_skill_names("\n".join([prompt, *additional_context]))
     parse = parse_model_output_multi if allow_parallel else parse_model_output
     # Completion claims are only hallucinations when no tool has actually run yet;
     # after real tool results a "created/updated the file" summary is legitimate.
@@ -967,7 +970,7 @@ async def _chat_resolving_tools(
             for call in outcome.tool_calls:
                 schema_error = validate_tool_arguments(
                     call.name, call.arguments, schemas
-                )
+                ) or validate_skill_call(call.name, call.arguments, skills)
                 if schema_error is not None:
                     outcome = ToolParseOutcome(
                         text=text.strip(), error=schema_error

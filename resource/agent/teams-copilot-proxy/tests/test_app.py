@@ -2271,6 +2271,101 @@ def test_schema_validation_rejects_wrong_argument_type() -> None:
     assert "must be of type" in fake.calls[1][0]
 
 
+SKILL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "skill",
+            "description": "Load a skill",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    }
+]
+
+SKILL_CATALOGUE = (
+    "Skills provide specialized instructions.\n"
+    "<available_skills>\n"
+    "  <skill>\n    <name>customize-opencode</name>\n"
+    "    <description>opencode's own configuration</description>\n  </skill>\n"
+    "  <skill>\n    <name>grill-me</name>\n"
+    "    <description>interview a plan</description>\n  </skill>\n"
+    "</available_skills>"
+)
+
+
+def test_unknown_skill_name_is_rejected_before_the_client_runs_it() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "init-repo"}}\n```',
+        '```tool_call\n{"name": "skill", "arguments": {"name": "grill-me"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [
+                {"role": "system", "content": SKILL_CATALOGUE},
+                {"role": "user", "content": "sharpen my plan"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "grill-me"}
+    correction = fake.calls[1][0]
+    assert 'skill "init-repo" does not exist' in correction
+    assert "customize-opencode, grill-me" in correction
+
+
+def test_known_skill_name_passes_through() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "customize-opencode"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [
+                {"role": "system", "content": SKILL_CATALOGUE},
+                {"role": "user", "content": "enable lsp in opencode.json"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "customize-opencode"}
+    assert len(fake.calls) == 1
+
+
+def test_skill_call_untouched_when_no_catalogue_in_prompt() -> None:
+    fake = ToolCallingCopilotClient([
+        '```tool_call\n{"name": "skill", "arguments": {"name": "whatever"}}\n```',
+    ])
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "tools": SKILL_TOOLS,
+            "messages": [{"role": "user", "content": "load a skill"}],
+        },
+    )
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"name": "whatever"}
+    assert len(fake.calls) == 1
+
+
 def _repeated_failure_transcript() -> list[dict]:
     failing_call = {
         "id": "call_1",

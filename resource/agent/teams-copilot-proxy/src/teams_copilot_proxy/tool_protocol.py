@@ -28,6 +28,15 @@ _TOOL_CALL_FENCE_OPEN_RE = re.compile(
 
 _CITATION_RE = re.compile(r"\[\^?\d+\^?\]|\[\d+\]\(https?://[^)]*\)")
 
+# OpenCode advertises its skills as an XML block inside the prompt text, not in
+# the skill tool's schema, so the catalogue can only be recovered from there.
+_AVAILABLE_SKILLS_RE = re.compile(
+    r"<available_skills>(?P<body>.*?)</available_skills>", re.DOTALL
+)
+_SKILL_NAME_RE = re.compile(r"<name>\s*(?P<name>[^<]+?)\s*</name>")
+
+SKILL_TOOL_NAME = "skill"
+
 TRUNCATED_ERROR_PREFIX = "tool_call block appears truncated"
 
 
@@ -234,6 +243,36 @@ def validate_tool_arguments(
                 f"got {type(value).__name__}"
             )
     return None
+
+
+def available_skill_names(text: str) -> set[str]:
+    """Skill names from the ``<available_skills>`` catalogue in the prompt."""
+    names: set[str] = set()
+    for block in _AVAILABLE_SKILLS_RE.finditer(text):
+        for match in _SKILL_NAME_RE.finditer(block.group("body")):
+            names.add(match.group("name"))
+    return names
+
+
+def validate_skill_call(
+    name: str, arguments: dict[str, Any], skills: set[str]
+) -> str | None:
+    """Check a ``skill`` call against the catalogue the client advertised.
+
+    The skill tool declares its ``name`` argument as a free-form string, so an
+    invented skill passes schema validation and only fails at the client, which
+    costs a full round trip. Only runs when a catalogue was actually parsed, so
+    a prompt without the block never rejects a call.
+    """
+    if name != SKILL_TOOL_NAME or not skills:
+        return None
+    requested = arguments.get("name")
+    if not isinstance(requested, str) or requested in skills:
+        return None
+    return (
+        f'skill "{requested}" does not exist; the available skills are: '
+        f"{', '.join(sorted(skills))}"
+    )
 
 
 def tool_reminder(tools: list[dict[str, Any]], allow_parallel: bool = False) -> str:
